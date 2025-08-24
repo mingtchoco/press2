@@ -1,0 +1,27 @@
+1 ICON "icon.ico"
+
+1 VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEOS          0x4
+FILETYPE        0x1
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "AutoKey"
+            VALUE "FileDescription", "AutoKey E - Automatic E Key Press"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "autokey_e"
+            VALUE "LegalCopyright", "Copyright 2025"
+            VALUE "OriginalFilename", "autokey_e.exe"
+            VALUE "ProductName", "AutoKey E"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
