@@ -1,0 +1,28 @@
+# Ignore nul files (Windows special file issue)
+nul
+nul.*
+NUL
+NUL.*
+
+# Build artifacts
+*.o
+*.obj
+*.res
+*.exe.manifest
+*.pdb
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# IDE files
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
