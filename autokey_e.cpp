@@ -10,20 +10,19 @@
 #pragma comment(lib, "user32.lib")
 
 // Window controls
-#define ID_TRACKBAR 1001
 #define TIMER_ID 1002
 
 // Global variables
 HWND hMainWnd;
-HWND hTrackBar;
 HWND hStatusLabel;
-HWND hIntervalLabel;
 HHOOK hKeyboardHook;
 bool isEnabled = false;
 bool isEPressed = false;
 bool isSendingKey = false;  // Flag to prevent blocking our own keys
-int currentInterval = 5;  // Default 5ms for faster response
 std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count());
+std::uniform_int_distribution<int> normalDist(1, 50);  // Normal: 1-50ms
+std::uniform_int_distribution<int> slowDist(50, 100);   // Slow: 50-100ms
+std::uniform_real_distribution<float> chanceDist(0.0f, 1.0f);  // For probability
 HBRUSH hBrushGreen = NULL;
 HBRUSH hBrushRed = NULL;
 
@@ -32,18 +31,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
 void UpdateUI();
 void SendEKey();
-int GetRandomInterval(int baseInterval);
-void CALLBACK TimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
+int GetRandomInterval();
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    // Initialize common controls
-    INITCOMMONCONTROLSEX icex;
-    icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    icex.dwICC = ICC_BAR_CLASSES;
-    InitCommonControlsEx(&icex);
-
     // Register window class
-    const wchar_t CLASS_NAME[] = L"AutoKeyE";
+    const wchar_t CLASS_NAME[] = L"P2";
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
@@ -54,13 +46,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     RegisterClassW(&wc);
 
-    // Create window - more compact
+    // Create window - ultra compact
     hMainWnd = CreateWindowExW(
-        WS_EX_TOPMOST,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         CLASS_NAME,
-        L"AutoKey E",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 220, 120,
+        L"P2",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 90, 90,
         NULL, NULL, hInstance, NULL
     );
 
@@ -68,58 +60,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 0;
     }
 
-    // Create status label - compact
+    // Create status label only - ultra minimal
     hStatusLabel = CreateWindowW(
         L"STATIC",
         L"OFF",
         WS_VISIBLE | WS_CHILD | SS_CENTER,
-        10, 10, 190, 25,
+        5, 15, 70, 35,
         hMainWnd, NULL, hInstance, NULL
     );
     
-    // Set compact font for status
+    // Set larger font for status
     HFONT hFontStatus = CreateFontW(
-        18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
     );
     SendMessage(hStatusLabel, WM_SETFONT, (WPARAM)hFontStatus, TRUE);
 
-    // Create interval label
-    hIntervalLabel = CreateWindowW(
-        L"STATIC",
-        L"5ms",
-        WS_VISIBLE | WS_CHILD | SS_CENTER,
-        10, 40, 190, 15,
-        hMainWnd, NULL, hInstance, NULL
-    );
-    
-    // Set font for interval label
-    HFONT hFontInterval = CreateFontW(
-        12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
-    );
-    SendMessage(hIntervalLabel, WM_SETFONT, (WPARAM)hFontInterval, TRUE);
-
-    // Create trackbar - compact
-    hTrackBar = CreateWindowExW(
-        0,
-        TRACKBAR_CLASSW,
-        L"Interval",
-        WS_VISIBLE | WS_CHILD | TBS_HORZ | TBS_NOTICKS,
-        10, 60, 190, 20,
-        hMainWnd, (HMENU)ID_TRACKBAR, hInstance, NULL
-    );
-
-    // Set trackbar range (1-50ms) - faster range
-    SendMessage(hTrackBar, TBM_SETRANGE, TRUE, MAKELPARAM(1, 50));
-    SendMessage(hTrackBar, TBM_SETPOS, TRUE, 5);  // Default 5ms
-    SendMessage(hTrackBar, TBM_SETTICFREQ, 5, 0);
-
-    // Register hotkeys
-    RegisterHotKey(hMainWnd, 1, 0, VK_F2);
-    RegisterHotKey(hMainWnd, 2, 0, VK_F3);
+    // Don't register hotkeys - we'll handle them in the keyboard hook
 
     // Install low-level keyboard hook
     hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
@@ -136,8 +94,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // Cleanup
     UnhookWindowsHookEx(hKeyboardHook);
-    UnregisterHotKey(hMainWnd, 1);
-    UnregisterHotKey(hMainWnd, 2);
 
     return 0;
 }
@@ -174,45 +130,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 return 1;  // Tell Windows we handled it
             }
             break;
-            
-        case WM_HOTKEY:
-            if (wParam == 1) { // F2 - Enable
-                isEnabled = true;
-                // Reset state when enabling
-                isEPressed = false;
-                KillTimer(hMainWnd, TIMER_ID);
-                UpdateUI();
-            } else if (wParam == 2) { // F3 - Disable
-                isEnabled = false;
-                isEPressed = false;
-                KillTimer(hMainWnd, TIMER_ID);
-                UpdateUI();
-            }
-            break;
-
-        case WM_HSCROLL:
-            if ((HWND)lParam == hTrackBar) {
-                currentInterval = SendMessage(hTrackBar, TBM_GETPOS, 0, 0);
-                wchar_t buffer[50];
-                wsprintfW(buffer, L"%dms", currentInterval);
-                SetWindowTextW(hIntervalLabel, buffer);
-                // Force trackbar redraw
-                InvalidateRect(hTrackBar, NULL, TRUE);
-            }
-            break;
 
         case WM_TIMER:
             if (wParam == TIMER_ID) {
-                // Check if E is still actually pressed
-                if (isEPressed && isEnabled && (GetAsyncKeyState('E') & 0x8000)) {
+                // Continue sending E while flag is set
+                if (isEPressed && isEnabled) {
                     // Send E key press
                     SendEKey();
                     // Continue with next interval
-                    KillTimer(hMainWnd, TIMER_ID);
-                    SetTimer(hMainWnd, TIMER_ID, GetRandomInterval(currentInterval), NULL);
+                    SetTimer(hMainWnd, TIMER_ID, GetRandomInterval(), NULL);
                 } else {
-                    // E is not pressed anymore, stop everything
-                    isEPressed = false;
+                    // Stop timer if conditions not met
                     KillTimer(hMainWnd, TIMER_ID);
                 }
             }
@@ -232,17 +160,33 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0) {
         KBDLLHOOKSTRUCT* pKeyboard = (KBDLLHOOKSTRUCT*)lParam;
         
+        // Handle F2 and F3 keys for enable/disable
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+            if (pKeyboard->vkCode == VK_F2) {
+                isEnabled = true;
+                isEPressed = false;
+                KillTimer(hMainWnd, TIMER_ID);
+                UpdateUI();
+                return 1; // Block F2 from reaching the game
+            } else if (pKeyboard->vkCode == VK_F3) {
+                isEnabled = false;
+                isEPressed = false;
+                KillTimer(hMainWnd, TIMER_ID);
+                UpdateUI();
+                return 1; // Block F3 from reaching the game
+            }
+        }
+        
         // Don't process our own keys
         if (isSendingKey) {
             return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
         }
         
-        // Always handle E key up to prevent stuck keys
+        // Handle E key up - ALWAYS stop when E is released
         if (pKeyboard->vkCode == 'E' && (wParam == WM_KEYUP || wParam == WM_SYSKEYUP)) {
-            if (isEPressed) {
-                isEPressed = false;
-                KillTimer(hMainWnd, TIMER_ID);
-            }
+            // Force stop regardless of state
+            isEPressed = false;
+            KillTimer(hMainWnd, TIMER_ID);
             if (isEnabled) {
                 return 1; // Block original E key up when enabled
             }
@@ -255,7 +199,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 // Send first E immediately
                 SendEKey();
                 // Start timer for rapid fire
-                SetTimer(hMainWnd, TIMER_ID, GetRandomInterval(currentInterval), NULL);
+                SetTimer(hMainWnd, TIMER_ID, GetRandomInterval(), NULL);
             }
             return 1; // Block original E key down
         }
@@ -269,11 +213,9 @@ void UpdateUI() {
     } else {
         SetWindowTextW(hStatusLabel, L"OFF");
     }
-    // Force complete window redraw including trackbar
+    // Force complete window redraw
     InvalidateRect(hMainWnd, NULL, TRUE);
-    InvalidateRect(hTrackBar, NULL, TRUE);
     UpdateWindow(hMainWnd);
-    UpdateWindow(hTrackBar);
 }
 
 void SendEKey() {
@@ -289,11 +231,12 @@ void SendEKey() {
     isSendingKey = false;
 }
 
-int GetRandomInterval(int baseInterval) {
-    // Generate random interval between 75% and 125% of base interval
-    std::uniform_int_distribution<int> dist(
-        (int)(baseInterval * 0.75),
-        (int)(baseInterval * 1.25)
-    );
-    return dist(rng);
+int GetRandomInterval() {
+    // 25% chance for slow interval (50-100ms)
+    // 75% chance for fast interval (1-50ms)
+    if (chanceDist(rng) < 0.25f) {
+        return slowDist(rng);  // Slow: 50-100ms
+    } else {
+        return normalDist(rng);  // Fast: 1-50ms
+    }
 }

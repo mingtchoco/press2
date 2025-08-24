@@ -10,21 +10,28 @@ for size in sizes:
     img = Image.new('RGBA', size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # Draw green circle
-    margin = size[0] // 8
-    draw.ellipse([margin, margin, size[0]-margin, size[1]-margin], 
-                 fill=(0, 200, 0, 255), outline=(0, 150, 0, 255))
+    # Draw darker green square with rounded corners
+    margin = size[0] // 12
+    # Dark green background
+    draw.rounded_rectangle([margin, margin, size[0]-margin, size[1]-margin], 
+                           radius=size[0]//8,
+                           fill=(0, 100, 0, 255), 
+                           outline=(255, 255, 255, 255), 
+                           width=1)
     
-    # Draw white 'E' in the center
+    # Draw bold white 'E' in the center
     # Try to use a font, fallback to basic text if not available
     try:
-        font_size = int(size[0] * 0.5)
-        # Try to use Arial font
+        font_size = int(size[0] * 0.6)  # Bigger font
+        # Try to use Arial Bold font
         try:
-            font = ImageFont.truetype("arial.ttf", font_size)
+            font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", font_size)  # Arial Bold
         except:
-            # Fallback to default font
-            font = ImageFont.load_default()
+            try:
+                font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", font_size)
+            except:
+                # Fallback to default font but bigger
+                font = ImageFont.load_default()
     except:
         font = ImageFont.load_default()
     
@@ -38,8 +45,11 @@ for size in sizes:
     x = (size[0] - text_width) // 2
     y = (size[1] - text_height) // 2 - bbox[1]
     
-    # Draw the text
-    draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
+    # Draw the E with thick white color
+    # Create a bold effect by drawing multiple times with slight offset
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            draw.text((x+dx, y+dy), text, fill=(255, 255, 255, 255), font=font)
     
     images.append(img)
 
