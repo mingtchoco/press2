@@ -2,26 +2,63 @@
 #define _UNICODE
 #include <windows.h>
 #include <commctrl.h>
+#include <psapi.h>
 #include <string>
 #include <random>
 #include <chrono>
 
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "user32.lib")
+// Libraries are linked via build script (-lcomctl32 -luser32)
 
-// Window controls
+// Constants
 #define TIMER_ID 1002
 
+// Window dimensions
+constexpr int WINDOW_WIDTH = 90;
+constexpr int WINDOW_HEIGHT = 90;
+
+// UI layout
+constexpr int LABEL_X = 5;
+constexpr int LABEL_Y = 15;
+constexpr int LABEL_WIDTH = 70;
+constexpr int LABEL_HEIGHT = 35;
+
+// Font settings
+constexpr int FONT_SIZE = 24;
+
+// Timing intervals (milliseconds)
+constexpr int FAST_MIN = 1;
+constexpr int FAST_MAX = 50;
+constexpr int SLOW_MIN = 50;
+constexpr int SLOW_MAX = 100;
+constexpr float SLOW_PROBABILITY = 0.25f;
+
+// Key delay
+constexpr int KEY_DELAY_MS = 1;
+
+// League of Legends process detection
+constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
+constexpr wchar_t LOL_PROCESS_2[] = L"LeagueClient.exe";
+constexpr wchar_t LOL_WINDOW_TITLE[] = L"League of Legends (TM) Client";
+
+// Colors
+constexpr COLORREF ENABLED_BG_COLOR = RGB(240, 255, 240);   // Soft mint
+constexpr COLORREF DISABLED_BG_COLOR = RGB(248, 248, 248);  // Light gray
+constexpr COLORREF ENABLED_TEXT_COLOR = RGB(34, 139, 34);   // Forest green
+constexpr COLORREF DISABLED_TEXT_COLOR = RGB(128, 128, 128); // Gray
+
 // Global variables
-HWND hMainWnd;
-HWND hStatusLabel;
-HHOOK hKeyboardHook;
+HWND hMainWnd = NULL;
+HWND hStatusLabel = NULL;
+HHOOK hKeyboardHook = NULL;
+HWINEVENTHOOK hWinEventHook = NULL;  // For window focus detection
+HFONT hFontStatus = NULL;  // Track font resource
 bool isEnabled = false;
 bool isEPressed = false;
 bool isSendingKey = false;  // Flag to prevent blocking our own keys
+bool isLoLFocused = false;  // Track if League of Legends is currently focused
 std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count());
-std::uniform_int_distribution<int> normalDist(1, 50);  // Normal: 1-50ms
-std::uniform_int_distribution<int> slowDist(50, 100);   // Slow: 50-100ms
+std::uniform_int_distribution<int> normalDist(FAST_MIN, FAST_MAX);  // Fast intervals
+std::uniform_int_distribution<int> slowDist(SLOW_MIN, SLOW_MAX);   // Slow intervals
 std::uniform_real_distribution<float> chanceDist(0.0f, 1.0f);  // For probability
 HBRUSH hBrushGreen = NULL;
 HBRUSH hBrushRed = NULL;
@@ -29,11 +66,16 @@ HBRUSH hBrushRed = NULL;
 // Function declarations
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
+VOID CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime);
+bool IsLeagueOfLegendsWindow(HWND hwnd);
+bool IsLeagueOfLegendsProcess(DWORD processId);
+void EnableAutoMode();
+void DisableAutoMode();
 void UpdateUI();
 void SendEKey();
 int GetRandomInterval();
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Register window class
     const wchar_t CLASS_NAME[] = L"P2";
     WNDCLASSW wc = {};
@@ -52,7 +94,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         CLASS_NAME,
         L"P2",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 90, 90,
+        CW_USEDEFAULT, CW_USEDEFAULT, WINDOW_WIDTH, WINDOW_HEIGHT,
         NULL, NULL, hInstance, NULL
     );
 
@@ -65,22 +107,41 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         L"STATIC",
         L"OFF",
         WS_VISIBLE | WS_CHILD | SS_CENTER,
-        5, 15, 70, 35,
+        LABEL_X, LABEL_Y, LABEL_WIDTH, LABEL_HEIGHT,
         hMainWnd, NULL, hInstance, NULL
     );
     
     // Set larger font for status
-    HFONT hFontStatus = CreateFontW(
-        24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+    hFontStatus = CreateFontW(
+        FONT_SIZE, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
     );
-    SendMessage(hStatusLabel, WM_SETFONT, (WPARAM)hFontStatus, TRUE);
+    if (hFontStatus) {
+        SendMessage(hStatusLabel, WM_SETFONT, (WPARAM)hFontStatus, TRUE);
+    }
 
     // Don't register hotkeys - we'll handle them in the keyboard hook
 
     // Install low-level keyboard hook
     hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
+
+    // Install window event hook for auto-detection
+    hWinEventHook = SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND,    // eventMin
+        EVENT_SYSTEM_FOREGROUND,    // eventMax
+        NULL,                       // hmodWinEventProc
+        WinEventProc,              // lpfnWinEventProc
+        0,                          // idProcess (0 = all processes)
+        0,                          // idThread (0 = all threads)
+        WINEVENT_OUTOFCONTEXT      // dwFlags
+    );
+
+    // Check initial foreground window
+    HWND foregroundWindow = GetForegroundWindow();
+    if (IsLeagueOfLegendsWindow(foregroundWindow)) {
+        EnableAutoMode();
+    }
 
     UpdateUI();
     ShowWindow(hMainWnd, nCmdShow);
@@ -92,8 +153,32 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         DispatchMessage(&msg);
     }
 
-    // Cleanup
-    UnhookWindowsHookEx(hKeyboardHook);
+    // Cleanup resources in proper order
+    if (hKeyboardHook) {
+        UnhookWindowsHookEx(hKeyboardHook);
+        hKeyboardHook = NULL;
+    }
+
+    if (hWinEventHook) {
+        UnhookWinEvent(hWinEventHook);
+        hWinEventHook = NULL;
+    }
+
+    // Clean up font
+    if (hFontStatus) {
+        DeleteObject(hFontStatus);
+        hFontStatus = NULL;
+    }
+
+    // Clean up brushes (if not already done in WM_DESTROY)
+    if (hBrushGreen) {
+        DeleteObject(hBrushGreen);
+        hBrushGreen = NULL;
+    }
+    if (hBrushRed) {
+        DeleteObject(hBrushRed);
+        hBrushRed = NULL;
+    }
 
     return 0;
 }
@@ -102,19 +187,19 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     switch (uMsg) {
         case WM_CREATE:
             // Create brushes - soft colors for less eye strain
-            hBrushGreen = CreateSolidBrush(RGB(240, 255, 240));  // Soft mint
-            hBrushRed = CreateSolidBrush(RGB(248, 248, 248));    // Light gray
+            hBrushGreen = CreateSolidBrush(ENABLED_BG_COLOR);
+            hBrushRed = CreateSolidBrush(DISABLED_BG_COLOR);
             break;
             
         case WM_CTLCOLORSTATIC:
             {
                 HDC hdcStatic = (HDC)wParam;
                 if (isEnabled) {
-                    SetTextColor(hdcStatic, RGB(34, 139, 34));  // Forest green
+                    SetTextColor(hdcStatic, ENABLED_TEXT_COLOR);
                     SetBkMode(hdcStatic, TRANSPARENT);
                     return (INT_PTR)hBrushGreen;
                 } else {
-                    SetTextColor(hdcStatic, RGB(128, 128, 128));  // Gray
+                    SetTextColor(hdcStatic, DISABLED_TEXT_COLOR);
                     SetBkMode(hdcStatic, TRANSPARENT);
                     return (INT_PTR)hBrushRed;
                 }
@@ -148,8 +233,24 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         case WM_DESTROY:
             // Clean up brushes
-            if (hBrushGreen) DeleteObject(hBrushGreen);
-            if (hBrushRed) DeleteObject(hBrushRed);
+            if (hBrushGreen) {
+                DeleteObject(hBrushGreen);
+                hBrushGreen = NULL;
+            }
+            if (hBrushRed) {
+                DeleteObject(hBrushRed);
+                hBrushRed = NULL;
+            }
+
+            // Clean up font
+            if (hFontStatus) {
+                DeleteObject(hFontStatus);
+                hFontStatus = NULL;
+            }
+
+            // Kill any running timer
+            KillTimer(hwnd, TIMER_ID);
+
             PostQuitMessage(0);
             return 0;
     }
@@ -224,7 +325,7 @@ void SendEKey() {
     
     // Method 1: Try keybd_event first (older but sometimes more compatible)
     keybd_event('E', MapVirtualKey('E', MAPVK_VK_TO_VSC), 0, 0);
-    Sleep(1); // Very short delay
+    Sleep(KEY_DELAY_MS); // Very short delay
     keybd_event('E', MapVirtualKey('E', MAPVK_VK_TO_VSC), KEYEVENTF_KEYUP, 0);
     
     // Reset flag
@@ -232,11 +333,103 @@ void SendEKey() {
 }
 
 int GetRandomInterval() {
-    // 25% chance for slow interval (50-100ms)
-    // 75% chance for fast interval (1-50ms)
-    if (chanceDist(rng) < 0.25f) {
-        return slowDist(rng);  // Slow: 50-100ms
+    // Configurable probability for slow vs fast intervals
+    if (chanceDist(rng) < SLOW_PROBABILITY) {
+        return slowDist(rng);  // Slow intervals
     } else {
-        return normalDist(rng);  // Fast: 1-50ms
+        return normalDist(rng);  // Fast intervals
+    }
+}
+
+// Check if a process ID belongs to League of Legends
+bool IsLeagueOfLegendsProcess(DWORD processId) {
+    if (processId == 0) return false;
+
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    if (!hProcess) return false;
+
+    wchar_t processName[MAX_PATH] = {0};
+    bool isLoL = false;
+
+    // Get the process executable name
+    if (GetModuleFileNameExW(hProcess, NULL, processName, MAX_PATH)) {
+        // Extract just the filename from the full path
+        wchar_t* fileName = wcsrchr(processName, L'\\');
+        if (fileName) {
+            fileName++; // Skip the backslash
+
+            // Check if it's one of the League of Legends processes
+            if (wcscmp(fileName, LOL_PROCESS_1) == 0 ||
+                wcscmp(fileName, LOL_PROCESS_2) == 0) {
+                isLoL = true;
+            }
+        }
+    }
+
+    CloseHandle(hProcess);
+    return isLoL;
+}
+
+// Check if a window belongs to League of Legends
+bool IsLeagueOfLegendsWindow(HWND hwnd) {
+    if (!hwnd) return false;
+
+    // First check by process
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    if (IsLeagueOfLegendsProcess(processId)) {
+        return true;
+    }
+
+    // Also check by window title for the client
+    wchar_t windowTitle[256] = {0};
+    if (GetWindowTextW(hwnd, windowTitle, 256)) {
+        if (wcsstr(windowTitle, LOL_WINDOW_TITLE) != nullptr) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Enable auto mode (called when LoL gains focus)
+void EnableAutoMode() {
+    if (!isLoLFocused) {
+        isLoLFocused = true;
+        if (!isEnabled) {  // Only auto-enable if not manually disabled
+            isEnabled = true;
+            isEPressed = false; // Reset E key state
+            KillTimer(hMainWnd, TIMER_ID);
+            UpdateUI();
+        }
+    }
+}
+
+// Disable auto mode (called when LoL loses focus)
+void DisableAutoMode() {
+    if (isLoLFocused) {
+        isLoLFocused = false;
+        if (isEnabled) {  // Auto-disable if currently enabled
+            isEnabled = false;
+            isEPressed = false;
+            KillTimer(hMainWnd, TIMER_ID);
+            UpdateUI();
+        }
+    }
+}
+
+// WinEventProc callback - called when foreground window changes
+VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD) {
+    // Only handle foreground window change events
+    if (event != EVENT_SYSTEM_FOREGROUND) return;
+
+    // Only process window objects
+    if (idObject != OBJID_WINDOW) return;
+
+    // Check if the new foreground window is League of Legends
+    if (IsLeagueOfLegendsWindow(hwnd)) {
+        EnableAutoMode();
+    } else {
+        DisableAutoMode();
     }
 }
