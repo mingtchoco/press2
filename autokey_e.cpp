@@ -40,6 +40,21 @@ constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
 constexpr wchar_t LOL_PROCESS_2[] = L"LeagueClient.exe";
 constexpr wchar_t LOL_WINDOW_TITLE[] = L"League of Legends (TM) Client";
 
+// Priority keys that should interrupt E key auto-repeat
+constexpr DWORD PRIORITY_KEYS[] = {
+    'Q', 'W', 'R',           // Main skills
+    '1', '2', '3', '4', '5', '6', '7',  // Item slots
+    VK_SPACE,                // Common for attack/stop
+    'D', 'F',               // Summoner spells
+    'B',                    // Recall
+    'P',                    // Ping/Stats
+    VK_TAB,                 // Scoreboard
+    'Y', 'U', 'I', 'O',     // Additional game keys
+    'A', 'S',               // Attack move, stop
+    'G', 'H'                // Ping wheel, shop
+};
+constexpr size_t PRIORITY_KEYS_COUNT = sizeof(PRIORITY_KEYS) / sizeof(PRIORITY_KEYS[0]);
+
 // Colors
 constexpr COLORREF ENABLED_BG_COLOR = RGB(240, 255, 240);   // Soft mint
 constexpr COLORREF DISABLED_BG_COLOR = RGB(248, 248, 248);  // Light gray
@@ -56,6 +71,7 @@ bool isEnabled = false;
 bool isEPressed = false;
 bool isSendingKey = false;  // Flag to prevent blocking our own keys
 bool isLoLFocused = false;  // Track if League of Legends is currently focused
+int priorityKeyCount = 0;  // Count of currently pressed priority keys
 std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count());
 std::uniform_int_distribution<int> normalDist(FAST_MIN, FAST_MAX);  // Fast intervals
 std::uniform_int_distribution<int> slowDist(SLOW_MIN, SLOW_MAX);   // Slow intervals
@@ -69,6 +85,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
 VOID CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime);
 bool IsLeagueOfLegendsWindow(HWND hwnd);
 bool IsLeagueOfLegendsProcess(DWORD processId);
+bool IsPriorityKey(DWORD vkCode);
 void EnableAutoMode();
 void DisableAutoMode();
 void UpdateUI();
@@ -218,14 +235,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         case WM_TIMER:
             if (wParam == TIMER_ID) {
-                // Continue sending E while flag is set
-                if (isEPressed && isEnabled) {
+                // Continue sending E while flag is set AND no priority key is pressed
+                if (isEPressed && isEnabled && priorityKeyCount == 0) {
                     // Send E key press
                     SendEKey();
-                    // Continue with next interval
-                    SetTimer(hMainWnd, TIMER_ID, GetRandomInterval(), NULL);
+                    // Continue with 50ms interval for smoother gameplay
+                    SetTimer(hMainWnd, TIMER_ID, 50, NULL);
                 } else {
-                    // Stop timer if conditions not met
+                    // Stop timer if conditions not met or priority key pressed
                     KillTimer(hMainWnd, TIMER_ID);
                 }
             }
@@ -293,14 +310,35 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             }
         }
         
+        // Handle priority keys (Q, W, R, etc.)
+        if (IsPriorityKey(pKeyboard->vkCode)) {
+            if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+                priorityKeyCount++;
+                // Stop E key timer when priority key is pressed
+                KillTimer(hMainWnd, TIMER_ID);
+            } else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+                if (priorityKeyCount > 0) {
+                    priorityKeyCount--;
+                }
+                // Resume E key timer if E is still pressed and enabled and no priority keys
+                if (isEPressed && isEnabled && priorityKeyCount == 0) {
+                    SetTimer(hMainWnd, TIMER_ID, 50, NULL);
+                }
+            }
+            // Let priority keys pass through normally
+            return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
+        }
+
         // Handle E key down only when enabled
         if (isEnabled && pKeyboard->vkCode == 'E' && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
             if (!isEPressed) {
                 isEPressed = true;
-                // Send first E immediately
-                SendEKey();
-                // Start timer for rapid fire
-                SetTimer(hMainWnd, TIMER_ID, GetRandomInterval(), NULL);
+                // Send first E immediately if no priority key is pressed
+                if (priorityKeyCount == 0) {
+                    SendEKey();
+                    // Start timer with 50ms interval
+                    SetTimer(hMainWnd, TIMER_ID, 50, NULL);
+                }
             }
             return 1; // Block original E key down
         }
@@ -339,6 +377,16 @@ int GetRandomInterval() {
     } else {
         return normalDist(rng);  // Fast intervals
     }
+}
+
+// Check if a key is a priority key that should interrupt E key auto-repeat
+bool IsPriorityKey(DWORD vkCode) {
+    for (size_t i = 0; i < PRIORITY_KEYS_COUNT; i++) {
+        if (PRIORITY_KEYS[i] == vkCode) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Check if a process ID belongs to League of Legends
