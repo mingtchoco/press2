@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ==============================================
-echo        AutoKey E Build System v2.0
+echo        AutoKey E Simple Build System
 echo ==============================================
 echo.
 

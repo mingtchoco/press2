@@ -3,11 +3,8 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <psapi.h>
-#include <string>
-#include <random>
-#include <chrono>
 
-// Libraries are linked via build script (-lcomctl32 -luser32)
+// Libraries are linked via build script (-lcomctl32 -luser32 -lpsapi)
 
 // Constants
 #define TIMER_ID 1002
@@ -25,35 +22,14 @@ constexpr int LABEL_HEIGHT = 35;
 // Font settings
 constexpr int FONT_SIZE = 24;
 
-// Timing intervals (milliseconds)
-constexpr int FAST_MIN = 1;
-constexpr int FAST_MAX = 50;
-constexpr int SLOW_MIN = 50;
-constexpr int SLOW_MAX = 100;
-constexpr float SLOW_PROBABILITY = 0.25f;
-
-// Key delay
+// Key delay and interval
 constexpr int KEY_DELAY_MS = 1;
+constexpr int E_KEY_INTERVAL = 10;  // Fixed 10ms interval
 
 // League of Legends process detection
 constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
 constexpr wchar_t LOL_PROCESS_2[] = L"LeagueClient.exe";
 constexpr wchar_t LOL_WINDOW_TITLE[] = L"League of Legends (TM) Client";
-
-// Priority keys that should interrupt E key auto-repeat
-constexpr DWORD PRIORITY_KEYS[] = {
-    'Q', 'W', 'R',           // Main skills
-    '1', '2', '3', '4', '5', '6', '7',  // Item slots
-    VK_SPACE,                // Common for attack/stop
-    'D', 'F',               // Summoner spells
-    'B',                    // Recall
-    'P',                    // Ping/Stats
-    VK_TAB,                 // Scoreboard
-    'Y', 'U', 'I', 'O',     // Additional game keys
-    'A', 'S',               // Attack move, stop
-    'G', 'H'                // Ping wheel, shop
-};
-constexpr size_t PRIORITY_KEYS_COUNT = sizeof(PRIORITY_KEYS) / sizeof(PRIORITY_KEYS[0]);
 
 // Colors
 constexpr COLORREF ENABLED_BG_COLOR = RGB(240, 255, 240);   // Soft mint
@@ -65,32 +41,22 @@ constexpr COLORREF DISABLED_TEXT_COLOR = RGB(128, 128, 128); // Gray
 HWND hMainWnd = NULL;
 HWND hStatusLabel = NULL;
 HHOOK hKeyboardHook = NULL;
-HWINEVENTHOOK hWinEventHook = NULL;  // For window focus detection
+HWINEVENTHOOK hWinEventHook = NULL;  // For League of Legends detection
 HFONT hFontStatus = NULL;  // Track font resource
 bool isEnabled = false;
 bool isEPressed = false;
 bool isSendingKey = false;  // Flag to prevent blocking our own keys
-bool isLoLFocused = false;  // Track if League of Legends is currently focused
-int priorityKeyCount = 0;  // Count of currently pressed priority keys
-std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count());
-std::uniform_int_distribution<int> normalDist(FAST_MIN, FAST_MAX);  // Fast intervals
-std::uniform_int_distribution<int> slowDist(SLOW_MIN, SLOW_MAX);   // Slow intervals
-std::uniform_real_distribution<float> chanceDist(0.0f, 1.0f);  // For probability
 HBRUSH hBrushGreen = NULL;
 HBRUSH hBrushRed = NULL;
 
 // Function declarations
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
-VOID CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime);
+VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD);
 bool IsLeagueOfLegendsWindow(HWND hwnd);
 bool IsLeagueOfLegendsProcess(DWORD processId);
-bool IsPriorityKey(DWORD vkCode);
-void EnableAutoMode();
-void DisableAutoMode();
 void UpdateUI();
 void SendEKey();
-int GetRandomInterval();
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Register window class
@@ -105,13 +71,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     RegisterClassW(&wc);
 
-    // Create window - ultra compact
+    // Get top-left corner of entire virtual screen (leftmost monitor in multi-monitor setup)
+    int windowX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int windowY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+    // Create window - ultra compact, positioned at leftmost top corner
     hMainWnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         CLASS_NAME,
         L"P2",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, WINDOW_WIDTH, WINDOW_HEIGHT,
+        windowX, windowY, WINDOW_WIDTH, WINDOW_HEIGHT,
         NULL, NULL, hInstance, NULL
     );
 
@@ -127,7 +97,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         LABEL_X, LABEL_Y, LABEL_WIDTH, LABEL_HEIGHT,
         hMainWnd, NULL, hInstance, NULL
     );
-    
+
     // Set larger font for status
     hFontStatus = CreateFontW(
         FONT_SIZE, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
@@ -138,12 +108,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         SendMessage(hStatusLabel, WM_SETFONT, (WPARAM)hFontStatus, TRUE);
     }
 
-    // Don't register hotkeys - we'll handle them in the keyboard hook
-
     // Install low-level keyboard hook
     hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
 
-    // Install window event hook for auto-detection
+    // Install window event hook for League of Legends detection
     hWinEventHook = SetWinEventHook(
         EVENT_SYSTEM_FOREGROUND,    // eventMin
         EVENT_SYSTEM_FOREGROUND,    // eventMax
@@ -157,7 +125,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Check initial foreground window
     HWND foregroundWindow = GetForegroundWindow();
     if (IsLeagueOfLegendsWindow(foregroundWindow)) {
-        EnableAutoMode();
+        isEnabled = true;
     }
 
     UpdateUI();
@@ -207,7 +175,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             hBrushGreen = CreateSolidBrush(ENABLED_BG_COLOR);
             hBrushRed = CreateSolidBrush(DISABLED_BG_COLOR);
             break;
-            
+
         case WM_CTLCOLORSTATIC:
             {
                 HDC hdcStatic = (HDC)wParam;
@@ -222,7 +190,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 }
             }
             break;
-            
+
         case WM_ERASEBKGND:
             {
                 HDC hdc = (HDC)wParam;
@@ -235,14 +203,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         case WM_TIMER:
             if (wParam == TIMER_ID) {
-                // Continue sending E while flag is set AND no priority key is pressed
-                if (isEPressed && isEnabled && priorityKeyCount == 0) {
+                // Continue sending E while flag is set
+                if (isEPressed && isEnabled) {
                     // Send E key press
                     SendEKey();
-                    // Continue with 50ms interval for smoother gameplay
-                    SetTimer(hMainWnd, TIMER_ID, 50, NULL);
+                    // Continue with 50ms interval
+                    SetTimer(hMainWnd, TIMER_ID, E_KEY_INTERVAL, NULL);
                 } else {
-                    // Stop timer if conditions not met or priority key pressed
+                    // Stop timer if conditions not met
                     KillTimer(hMainWnd, TIMER_ID);
                 }
             }
@@ -277,7 +245,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0) {
         KBDLLHOOKSTRUCT* pKeyboard = (KBDLLHOOKSTRUCT*)lParam;
-        
+
         // Handle F2 and F3 keys for enable/disable
         if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
             if (pKeyboard->vkCode == VK_F2) {
@@ -294,12 +262,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 return 1; // Block F3 from reaching the game
             }
         }
-        
+
         // Don't process our own keys
         if (isSendingKey) {
             return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
         }
-        
+
         // Handle E key up - ALWAYS stop when E is released
         if (pKeyboard->vkCode == 'E' && (wParam == WM_KEYUP || wParam == WM_SYSKEYUP)) {
             // Force stop regardless of state
@@ -309,36 +277,15 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 return 1; // Block original E key up when enabled
             }
         }
-        
-        // Handle priority keys (Q, W, R, etc.)
-        if (IsPriorityKey(pKeyboard->vkCode)) {
-            if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
-                priorityKeyCount++;
-                // Stop E key timer when priority key is pressed
-                KillTimer(hMainWnd, TIMER_ID);
-            } else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
-                if (priorityKeyCount > 0) {
-                    priorityKeyCount--;
-                }
-                // Resume E key timer if E is still pressed and enabled and no priority keys
-                if (isEPressed && isEnabled && priorityKeyCount == 0) {
-                    SetTimer(hMainWnd, TIMER_ID, 50, NULL);
-                }
-            }
-            // Let priority keys pass through normally
-            return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
-        }
 
         // Handle E key down only when enabled
         if (isEnabled && pKeyboard->vkCode == 'E' && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
             if (!isEPressed) {
                 isEPressed = true;
-                // Send first E immediately if no priority key is pressed
-                if (priorityKeyCount == 0) {
-                    SendEKey();
-                    // Start timer with 50ms interval
-                    SetTimer(hMainWnd, TIMER_ID, 50, NULL);
-                }
+                // Send first E immediately
+                SendEKey();
+                // Start timer with 50ms interval
+                SetTimer(hMainWnd, TIMER_ID, E_KEY_INTERVAL, NULL);
             }
             return 1; // Block original E key down
         }
@@ -360,33 +307,14 @@ void UpdateUI() {
 void SendEKey() {
     // Set flag to prevent blocking our own keys
     isSendingKey = true;
-    
-    // Method 1: Try keybd_event first (older but sometimes more compatible)
+
+    // Send E key press
     keybd_event('E', MapVirtualKey('E', MAPVK_VK_TO_VSC), 0, 0);
     Sleep(KEY_DELAY_MS); // Very short delay
     keybd_event('E', MapVirtualKey('E', MAPVK_VK_TO_VSC), KEYEVENTF_KEYUP, 0);
-    
+
     // Reset flag
     isSendingKey = false;
-}
-
-int GetRandomInterval() {
-    // Configurable probability for slow vs fast intervals
-    if (chanceDist(rng) < SLOW_PROBABILITY) {
-        return slowDist(rng);  // Slow intervals
-    } else {
-        return normalDist(rng);  // Fast intervals
-    }
-}
-
-// Check if a key is a priority key that should interrupt E key auto-repeat
-bool IsPriorityKey(DWORD vkCode) {
-    for (size_t i = 0; i < PRIORITY_KEYS_COUNT; i++) {
-        if (PRIORITY_KEYS[i] == vkCode) {
-            return true;
-        }
-    }
-    return false;
 }
 
 // Check if a process ID belongs to League of Legends
@@ -440,32 +368,6 @@ bool IsLeagueOfLegendsWindow(HWND hwnd) {
     return false;
 }
 
-// Enable auto mode (called when LoL gains focus)
-void EnableAutoMode() {
-    if (!isLoLFocused) {
-        isLoLFocused = true;
-        if (!isEnabled) {  // Only auto-enable if not manually disabled
-            isEnabled = true;
-            isEPressed = false; // Reset E key state
-            KillTimer(hMainWnd, TIMER_ID);
-            UpdateUI();
-        }
-    }
-}
-
-// Disable auto mode (called when LoL loses focus)
-void DisableAutoMode() {
-    if (isLoLFocused) {
-        isLoLFocused = false;
-        if (isEnabled) {  // Auto-disable if currently enabled
-            isEnabled = false;
-            isEPressed = false;
-            KillTimer(hMainWnd, TIMER_ID);
-            UpdateUI();
-        }
-    }
-}
-
 // WinEventProc callback - called when foreground window changes
 VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD) {
     // Only handle foreground window change events
@@ -476,8 +378,18 @@ VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
 
     // Check if the new foreground window is League of Legends
     if (IsLeagueOfLegendsWindow(hwnd)) {
-        EnableAutoMode();
+        // Auto-enable when LoL gains focus
+        if (!isEnabled) {
+            isEnabled = true;
+            UpdateUI();
+        }
     } else {
-        DisableAutoMode();
+        // Auto-disable when LoL loses focus
+        if (isEnabled) {
+            isEnabled = false;
+            isEPressed = false;
+            KillTimer(hMainWnd, TIMER_ID);
+            UpdateUI();
+        }
     }
 }
