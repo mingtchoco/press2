@@ -22,9 +22,13 @@ constexpr int LABEL_HEIGHT = 35;
 // Font settings
 constexpr int FONT_SIZE = 24;
 
-// Key delay and interval
-constexpr int KEY_DELAY_MS = 1;
+// Key interval (no delay needed with SendInput batch)
 constexpr int E_KEY_INTERVAL = 10;  // Fixed 10ms interval
+
+// Custom messages for async key processing
+#define WM_APP_SEND_E_START (WM_APP + 1)
+#define WM_APP_SEND_E_STOP  (WM_APP + 2)
+#define WM_APP_UPDATE_UI    (WM_APP + 3)
 
 // League of Legends process detection
 constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
@@ -45,22 +49,72 @@ HWINEVENTHOOK hWinEventHook = NULL;  // For League of Legends detection
 HFONT hFontStatus = NULL;  // Track font resource
 bool isEnabled = false;
 bool isEPressed = false;
-bool isSendingKey = false;  // Flag to prevent blocking our own keys
+// isSendingKey removed: using LLKHF_INJECTED flag instead (race-condition free)
 HBRUSH hBrushGreen = NULL;
 HBRUSH hBrushRed = NULL;
+
+// Monitor enumeration data
+struct MonitorEnumData {
+    int leftmostX = INT_MAX;
+    int leftmostY = 0;
+    bool found = false;
+};
 
 // Function declarations
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
 VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD);
+BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMonitor, LPARAM dwData);
 bool IsLeagueOfLegendsWindow(HWND hwnd);
 bool IsLeagueOfLegendsProcess(DWORD processId);
 void UpdateUI();
 void SendEKey();
 
+// Monitor enumeration callback to find leftmost monitor
+BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC, LPRECT lprcMonitor, LPARAM dwData) {
+    MonitorEnumData* data = reinterpret_cast<MonitorEnumData*>(dwData);
+
+    // Check if this monitor is more to the left
+    if (lprcMonitor->left < data->leftmostX) {
+        data->leftmostX = lprcMonitor->left;
+        data->leftmostY = lprcMonitor->top;
+        data->found = true;
+    }
+
+    return TRUE; // Continue enumeration
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
-    // Register window class
     const wchar_t CLASS_NAME[] = L"P2";
+
+    // Check for existing instance and terminate it
+    HWND hwndExisting = FindWindowW(CLASS_NAME, L"P2");
+    if (hwndExisting) {
+        // Try graceful shutdown first
+        SendMessage(hwndExisting, WM_CLOSE, 0, 0);
+
+        // Wait up to 2 seconds for graceful shutdown
+        for (int i = 0; i < 20; i++) {
+            if (!IsWindow(hwndExisting)) break;
+            Sleep(100);
+        }
+
+        // Force terminate if still running
+        if (IsWindow(hwndExisting)) {
+            DWORD processId = 0;
+            GetWindowThreadProcessId(hwndExisting, &processId);
+            if (processId != 0) {
+                HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, processId);
+                if (hProcess) {
+                    TerminateProcess(hProcess, 0);
+                    CloseHandle(hProcess);
+                    Sleep(200); // Wait for process cleanup
+                }
+            }
+        }
+    }
+
+    // Register window class
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
@@ -71,11 +125,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     RegisterClassW(&wc);
 
-    // Get top-left corner of entire virtual screen (leftmost monitor in multi-monitor setup)
-    int windowX = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    int windowY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    // Find the leftmost monitor's actual top-left corner
+    MonitorEnumData monitorData;
+    EnumDisplayMonitors(NULL, NULL, MonitorEnumProc, reinterpret_cast<LPARAM>(&monitorData));
 
-    // Create window - ultra compact, positioned at leftmost top corner
+    // Use found coordinates, or fallback to (0, 0) if enumeration failed
+    int windowX = monitorData.found ? monitorData.leftmostX : 0;
+    int windowY = monitorData.found ? monitorData.leftmostY : 0;
+
+    // Create window - positioned at leftmost monitor's top-left corner
     hMainWnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         CLASS_NAME,
@@ -149,21 +207,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         hWinEventHook = NULL;
     }
 
-    // Clean up font
-    if (hFontStatus) {
-        DeleteObject(hFontStatus);
-        hFontStatus = NULL;
-    }
-
-    // Clean up brushes (if not already done in WM_DESTROY)
-    if (hBrushGreen) {
-        DeleteObject(hBrushGreen);
-        hBrushGreen = NULL;
-    }
-    if (hBrushRed) {
-        DeleteObject(hBrushRed);
-        hBrushRed = NULL;
-    }
+    // GDI resources (font, brushes) are cleaned up in WM_DESTROY
 
     return 0;
 }
@@ -203,17 +247,32 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         case WM_TIMER:
             if (wParam == TIMER_ID) {
-                // Continue sending E while flag is set
+                // Send E only if conditions still met
                 if (isEPressed && isEnabled) {
-                    // Send E key press
                     SendEKey();
-                    // Continue with 50ms interval
-                    SetTimer(hMainWnd, TIMER_ID, E_KEY_INTERVAL, NULL);
+                    // Timer auto-repeats, no need to call SetTimer again
                 } else {
-                    // Stop timer if conditions not met
                     KillTimer(hMainWnd, TIMER_ID);
                 }
             }
+            break;
+
+        case WM_APP_SEND_E_START:
+            // Async handler: first E key + start timer (called from hook via PostMessage)
+            if (isEPressed && isEnabled) {
+                SendEKey();
+                SetTimer(hMainWnd, TIMER_ID, E_KEY_INTERVAL, NULL);
+            }
+            break;
+
+        case WM_APP_SEND_E_STOP:
+            // Async handler: stop timer (called from hook via PostMessage)
+            KillTimer(hMainWnd, TIMER_ID);
+            break;
+
+        case WM_APP_UPDATE_UI:
+            // Async handler: update UI (called from hook via PostMessage)
+            UpdateUI();
             break;
 
         case WM_DESTROY:
@@ -251,30 +310,29 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             if (pKeyboard->vkCode == VK_F2) {
                 isEnabled = true;
                 isEPressed = false;
-                KillTimer(hMainWnd, TIMER_ID);
-                UpdateUI();
-                return 1; // Block F2 from reaching the game
+                PostMessage(hMainWnd, WM_APP_SEND_E_STOP, 0, 0);
+                PostMessage(hMainWnd, WM_APP_UPDATE_UI, 0, 0);
+                return 1;
             } else if (pKeyboard->vkCode == VK_F3) {
                 isEnabled = false;
                 isEPressed = false;
-                KillTimer(hMainWnd, TIMER_ID);
-                UpdateUI();
-                return 1; // Block F3 from reaching the game
+                PostMessage(hMainWnd, WM_APP_SEND_E_STOP, 0, 0);
+                PostMessage(hMainWnd, WM_APP_UPDATE_UI, 0, 0);
+                return 1;
             }
         }
 
-        // Don't process our own keys
-        if (isSendingKey) {
+        // Skip injected keys (from SendInput/keybd_event) to avoid processing our own output
+        if (pKeyboard->flags & LLKHF_INJECTED) {
             return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
         }
 
         // Handle E key up - ALWAYS stop when E is released
         if (pKeyboard->vkCode == 'E' && (wParam == WM_KEYUP || wParam == WM_SYSKEYUP)) {
-            // Force stop regardless of state
             isEPressed = false;
-            KillTimer(hMainWnd, TIMER_ID);
+            PostMessage(hMainWnd, WM_APP_SEND_E_STOP, 0, 0);
             if (isEnabled) {
-                return 1; // Block original E key up when enabled
+                return 1;
             }
         }
 
@@ -282,12 +340,10 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (isEnabled && pKeyboard->vkCode == 'E' && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
             if (!isEPressed) {
                 isEPressed = true;
-                // Send first E immediately
-                SendEKey();
-                // Start timer with 50ms interval
-                SetTimer(hMainWnd, TIMER_ID, E_KEY_INTERVAL, NULL);
+                // Async: post message to UI thread for key sending + timer start
+                PostMessage(hMainWnd, WM_APP_SEND_E_START, 0, 0);
             }
-            return 1; // Block original E key down
+            return 1;
         }
     }
     return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
@@ -299,22 +355,24 @@ void UpdateUI() {
     } else {
         SetWindowTextW(hStatusLabel, L"OFF");
     }
-    // Force complete window redraw
     InvalidateRect(hMainWnd, NULL, TRUE);
     UpdateWindow(hMainWnd);
 }
 
 void SendEKey() {
-    // Set flag to prevent blocking our own keys
-    isSendingKey = true;
+    // SendInput: batch down+up in one call (no Sleep needed, atomic operation)
+    // Injected keys are auto-flagged with LLKHF_INJECTED and skipped in hook
+    INPUT inputs[2] = {};
 
-    // Send E key press
-    keybd_event('E', MapVirtualKey('E', MAPVK_VK_TO_VSC), 0, 0);
-    Sleep(KEY_DELAY_MS); // Very short delay
-    keybd_event('E', MapVirtualKey('E', MAPVK_VK_TO_VSC), KEYEVENTF_KEYUP, 0);
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = 'E';
+    inputs[0].ki.dwFlags = 0;
 
-    // Reset flag
-    isSendingKey = false;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = 'E';
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+
+    SendInput(2, inputs, sizeof(INPUT));
 }
 
 // Check if a process ID belongs to League of Legends
