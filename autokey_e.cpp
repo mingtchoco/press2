@@ -22,8 +22,9 @@ constexpr int LABEL_HEIGHT = 35;
 // Font settings
 constexpr int FONT_SIZE = 24;
 
-// Key interval (no delay needed with SendInput batch)
-constexpr int E_KEY_INTERVAL = 10;  // Fixed 10ms interval
+// Key repeat interval
+constexpr int E_KEY_INTERVAL = 10;  // 10ms repeat interval
+constexpr int E_KEY_FIRST_DELAY = 1; // 1ms for first key (near-instant)
 
 // League of Legends process detection
 constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
@@ -242,10 +243,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         case WM_TIMER:
             if (wParam == TIMER_ID) {
-                // Send E only if conditions still met
                 if (isEPressed && isEnabled) {
+                    // Send E key from timer context (NOT from hook callback)
+                    // This avoids hook chain re-entry that causes system freeze
                     SendEKey();
-                    // Timer auto-repeats, no need to call SetTimer again
+                    // After first quick fire, switch to normal repeat interval
+                    SetTimer(hMainWnd, TIMER_ID, E_KEY_INTERVAL, NULL);
                 } else {
                     KillTimer(hMainWnd, TIMER_ID);
                 }
@@ -317,8 +320,10 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (isEnabled && pKeyboard->vkCode == 'E' && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
             if (!isEPressed) {
                 isEPressed = true;
-                SendEKey();
-                SetTimer(hMainWnd, TIMER_ID, E_KEY_INTERVAL, NULL);
+                // DO NOT call SendEKey() here - calling keybd_event inside hook
+                // causes synchronous hook chain re-entry which freezes the system.
+                // Instead, fire a 1ms timer so WM_TIMER sends the first key almost instantly.
+                SetTimer(hMainWnd, TIMER_ID, E_KEY_FIRST_DELAY, NULL);
             }
             return 1;
         }
