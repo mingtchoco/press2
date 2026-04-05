@@ -337,19 +337,12 @@ void UpdateUI() {
 }
 
 void SendEKey() {
-    // SendInput: batch down+up in one call (no Sleep needed, atomic operation)
+    // keybd_event: works reliably inside hook callbacks (unlike SendInput)
     // Injected keys are auto-flagged with LLKHF_INJECTED and skipped in hook
-    INPUT inputs[2] = {};
-
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = 'E';
-    inputs[0].ki.dwFlags = 0;
-
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = 'E';
-    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-
-    SendInput(2, inputs, sizeof(INPUT));
+    // No Sleep needed between down/up - eliminates the original lag issue
+    BYTE scanCode = (BYTE)MapVirtualKey('E', MAPVK_VK_TO_VSC);
+    keybd_event('E', scanCode, 0, 0);
+    keybd_event('E', scanCode, KEYEVENTF_KEYUP, 0);
 }
 
 // Check if a process ID belongs to League of Legends
