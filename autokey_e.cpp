@@ -25,11 +25,6 @@ constexpr int FONT_SIZE = 24;
 // Key interval (no delay needed with SendInput batch)
 constexpr int E_KEY_INTERVAL = 10;  // Fixed 10ms interval
 
-// Custom messages for async key processing
-#define WM_APP_SEND_E_START (WM_APP + 1)
-#define WM_APP_SEND_E_STOP  (WM_APP + 2)
-#define WM_APP_UPDATE_UI    (WM_APP + 3)
-
 // League of Legends process detection
 constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
 constexpr wchar_t LOL_PROCESS_2[] = L"LeagueClient.exe";
@@ -257,24 +252,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
             break;
 
-        case WM_APP_SEND_E_START:
-            // Async handler: first E key + start timer (called from hook via PostMessage)
-            if (isEPressed && isEnabled) {
-                SendEKey();
-                SetTimer(hMainWnd, TIMER_ID, E_KEY_INTERVAL, NULL);
-            }
-            break;
-
-        case WM_APP_SEND_E_STOP:
-            // Async handler: stop timer (called from hook via PostMessage)
-            KillTimer(hMainWnd, TIMER_ID);
-            break;
-
-        case WM_APP_UPDATE_UI:
-            // Async handler: update UI (called from hook via PostMessage)
-            UpdateUI();
-            break;
-
         case WM_DESTROY:
             // Clean up brushes
             if (hBrushGreen) {
@@ -310,19 +287,19 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             if (pKeyboard->vkCode == VK_F2) {
                 isEnabled = true;
                 isEPressed = false;
-                PostMessage(hMainWnd, WM_APP_SEND_E_STOP, 0, 0);
-                PostMessage(hMainWnd, WM_APP_UPDATE_UI, 0, 0);
+                KillTimer(hMainWnd, TIMER_ID);
+                UpdateUI();
                 return 1;
             } else if (pKeyboard->vkCode == VK_F3) {
                 isEnabled = false;
                 isEPressed = false;
-                PostMessage(hMainWnd, WM_APP_SEND_E_STOP, 0, 0);
-                PostMessage(hMainWnd, WM_APP_UPDATE_UI, 0, 0);
+                KillTimer(hMainWnd, TIMER_ID);
+                UpdateUI();
                 return 1;
             }
         }
 
-        // Skip injected keys (from SendInput/keybd_event) to avoid processing our own output
+        // Skip injected keys (from SendInput) to avoid re-processing our own output
         if (pKeyboard->flags & LLKHF_INJECTED) {
             return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
         }
@@ -330,7 +307,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         // Handle E key up - ALWAYS stop when E is released
         if (pKeyboard->vkCode == 'E' && (wParam == WM_KEYUP || wParam == WM_SYSKEYUP)) {
             isEPressed = false;
-            PostMessage(hMainWnd, WM_APP_SEND_E_STOP, 0, 0);
+            KillTimer(hMainWnd, TIMER_ID);
             if (isEnabled) {
                 return 1;
             }
@@ -340,8 +317,8 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (isEnabled && pKeyboard->vkCode == 'E' && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
             if (!isEPressed) {
                 isEPressed = true;
-                // Async: post message to UI thread for key sending + timer start
-                PostMessage(hMainWnd, WM_APP_SEND_E_START, 0, 0);
+                SendEKey();
+                SetTimer(hMainWnd, TIMER_ID, E_KEY_INTERVAL, NULL);
             }
             return 1;
         }
