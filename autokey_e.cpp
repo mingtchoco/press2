@@ -6,9 +6,6 @@
 
 // Libraries are linked via build script (-lcomctl32 -luser32 -lpsapi)
 
-// Constants
-#define TIMER_ID 1002
-
 // Window dimensions
 constexpr int WINDOW_WIDTH = 90;
 constexpr int WINDOW_HEIGHT = 90;
@@ -22,9 +19,8 @@ constexpr int LABEL_HEIGHT = 35;
 // Font settings
 constexpr int FONT_SIZE = 24;
 
-// Key repeat interval
-constexpr int E_KEY_INTERVAL = 10;  // 10ms repeat interval
-constexpr int E_KEY_FIRST_DELAY = 1; // 1ms for first key (near-instant)
+// Key repeat interval (milliseconds between E key sends while held)
+constexpr int E_KEY_INTERVAL = 10;
 
 // League of Legends process detection
 constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
@@ -43,11 +39,14 @@ HWND hStatusLabel = NULL;
 HHOOK hKeyboardHook = NULL;
 HWINEVENTHOOK hWinEventHook = NULL;  // For League of Legends detection
 HFONT hFontStatus = NULL;  // Track font resource
-bool isEnabled = false;
-bool isEPressed = false;
-// isSendingKey removed: using LLKHF_INJECTED flag instead (race-condition free)
+volatile bool isEnabled = false;
+volatile bool isEPressed = false;
 HBRUSH hBrushGreen = NULL;
 HBRUSH hBrushRed = NULL;
+
+// Worker thread for key sending (decoupled from hook callback to prevent freezes)
+HANDLE g_workerThread = NULL;
+volatile bool g_exitThread = false;
 
 // Monitor enumeration data
 struct MonitorEnumData {
@@ -61,6 +60,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
 VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD);
 BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMonitor, LPARAM dwData);
+DWORD WINAPI WorkerThreadProc(LPVOID lpParam);
 bool IsLeagueOfLegendsWindow(HWND hwnd);
 bool IsLeagueOfLegendsProcess(DWORD processId);
 void UpdateUI();
@@ -176,6 +176,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         WINEVENT_OUTOFCONTEXT      // dwFlags
     );
 
+    // Start worker thread for key sending (decoupled from hook callback)
+    g_exitThread = false;
+    g_workerThread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, NULL);
+
     // Check initial foreground window
     HWND foregroundWindow = GetForegroundWindow();
     if (IsLeagueOfLegendsWindow(foregroundWindow)) {
@@ -190,6 +194,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
+    }
+
+    // Signal worker thread to exit and wait for it
+    g_exitThread = true;
+    isEPressed = false;
+    if (g_workerThread) {
+        WaitForSingleObject(g_workerThread, 1000);
+        CloseHandle(g_workerThread);
+        g_workerThread = NULL;
     }
 
     // Cleanup resources in proper order
@@ -241,18 +254,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
             break;
 
-        case WM_TIMER:
-            if (wParam == TIMER_ID) {
-                if (isEPressed && isEnabled) {
-                    // Send E key from timer context (NOT from hook callback)
-                    // This avoids hook chain re-entry that causes system freeze
-                    SendEKey();
-                    // After first quick fire, switch to normal repeat interval
-                    SetTimer(hMainWnd, TIMER_ID, E_KEY_INTERVAL, NULL);
-                } else {
-                    KillTimer(hMainWnd, TIMER_ID);
-                }
-            }
+        case WM_APP + 1:
+            // UI update request from hook callback (F2/F3/focus change)
+            UpdateUI();
             break;
 
         case WM_DESTROY:
@@ -272,9 +276,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 hFontStatus = NULL;
             }
 
-            // Kill any running timer
-            KillTimer(hwnd, TIMER_ID);
-
             PostQuitMessage(0);
             return 0;
     }
@@ -282,50 +283,44 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 }
 
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // CRITICAL: This callback must be extremely fast. NO keybd_event/SendInput
+    // calls allowed here - they cause hook chain re-entry and system freeze.
+    // All key sending is delegated to g_workerThread via flag polling.
     if (nCode >= 0) {
         KBDLLHOOKSTRUCT* pKeyboard = (KBDLLHOOKSTRUCT*)lParam;
 
-        // Handle F2 and F3 keys for enable/disable
-        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
-            if (pKeyboard->vkCode == VK_F2) {
-                isEnabled = true;
-                isEPressed = false;
-                KillTimer(hMainWnd, TIMER_ID);
-                UpdateUI();
-                return 1;
-            } else if (pKeyboard->vkCode == VK_F3) {
-                isEnabled = false;
-                isEPressed = false;
-                KillTimer(hMainWnd, TIMER_ID);
-                UpdateUI();
-                return 1;
-            }
-        }
-
-        // Skip injected keys (from SendInput) to avoid re-processing our own output
+        // Skip injected keys (from our worker thread) - fast path
         if (pKeyboard->flags & LLKHF_INJECTED) {
             return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
         }
 
-        // Handle E key up - ALWAYS stop when E is released
-        if (pKeyboard->vkCode == 'E' && (wParam == WM_KEYUP || wParam == WM_SYSKEYUP)) {
-            isEPressed = false;
-            KillTimer(hMainWnd, TIMER_ID);
-            if (isEnabled) {
+        // Handle F2 and F3 keys for enable/disable (flag-only, no UI calls)
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+            if (pKeyboard->vkCode == VK_F2) {
+                isEnabled = true;
+                isEPressed = false;
+                PostMessage(hMainWnd, WM_APP + 1, 0, 0); // Request UI update
+                return 1;
+            } else if (pKeyboard->vkCode == VK_F3) {
+                isEnabled = false;
+                isEPressed = false;
+                PostMessage(hMainWnd, WM_APP + 1, 0, 0); // Request UI update
                 return 1;
             }
         }
 
-        // Handle E key down only when enabled
-        if (isEnabled && pKeyboard->vkCode == 'E' && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
-            if (!isEPressed) {
-                isEPressed = true;
-                // DO NOT call SendEKey() here - calling keybd_event inside hook
-                // causes synchronous hook chain re-entry which freezes the system.
-                // Instead, fire a 1ms timer so WM_TIMER sends the first key almost instantly.
-                SetTimer(hMainWnd, TIMER_ID, E_KEY_FIRST_DELAY, NULL);
+        // E key up: clear flag (worker thread will stop on next poll)
+        if (pKeyboard->vkCode == 'E' && (wParam == WM_KEYUP || wParam == WM_SYSKEYUP)) {
+            isEPressed = false;
+            if (isEnabled) {
+                return 1; // Block original E up
             }
-            return 1;
+        }
+
+        // E key down: set flag (worker thread will start sending on next poll)
+        if (isEnabled && pKeyboard->vkCode == 'E' && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+            isEPressed = true;
+            return 1; // Block original E down
         }
     }
     return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
@@ -342,12 +337,31 @@ void UpdateUI() {
 }
 
 void SendEKey() {
-    // keybd_event: works reliably inside hook callbacks (unlike SendInput)
+    // Called ONLY from worker thread (never from hook callback)
     // Injected keys are auto-flagged with LLKHF_INJECTED and skipped in hook
-    // No Sleep needed between down/up - eliminates the original lag issue
     BYTE scanCode = (BYTE)MapVirtualKey('E', MAPVK_VK_TO_VSC);
     keybd_event('E', scanCode, 0, 0);
     keybd_event('E', scanCode, KEYEVENTF_KEYUP, 0);
+}
+
+// Worker thread: polls the isEPressed flag and sends E key at fixed interval.
+// This thread is COMPLETELY decoupled from the hook callback, so hook chain
+// re-entry (caused by keybd_event calls) does not freeze the input pipeline.
+DWORD WINAPI WorkerThreadProc(LPVOID) {
+    while (!g_exitThread) {
+        if (isEPressed && isEnabled) {
+            SendEKey();
+            // Sleep for the repeat interval (breaks early if exit requested)
+            for (int i = 0; i < E_KEY_INTERVAL && !g_exitThread; i++) {
+                Sleep(1);
+                if (!isEPressed || !isEnabled) break; // Stop immediately on release
+            }
+        } else {
+            // Idle poll: 2ms gives near-instant response when E is pressed
+            Sleep(2);
+        }
+    }
+    return 0;
 }
 
 // Check if a process ID belongs to League of Legends
@@ -414,15 +428,14 @@ VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         // Auto-enable when LoL gains focus
         if (!isEnabled) {
             isEnabled = true;
-            UpdateUI();
+            PostMessage(hMainWnd, WM_APP + 1, 0, 0);
         }
     } else {
         // Auto-disable when LoL loses focus
         if (isEnabled) {
             isEnabled = false;
             isEPressed = false;
-            KillTimer(hMainWnd, TIMER_ID);
-            UpdateUI();
+            PostMessage(hMainWnd, WM_APP + 1, 0, 0);
         }
     }
 }
