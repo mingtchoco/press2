@@ -33,7 +33,7 @@ if errorlevel 1 (
 echo       Resource file compiled successfully.
 
 echo [2/4] Compiling main program...
-g++ -Wall -Wextra -O3 -mwindows -static autokey_e.cpp resource.res -o autokey_e.exe -lcomctl32 -luser32 -lpsapi -std=c++17
+g++ -Wall -Wextra -O3 -mwindows -static autokey_e.cpp resource.res -o autokey_e.exe -lcomctl32 -luser32 -lpsapi -lwinmm -std=c++17
 if errorlevel 1 (
     echo [ERROR] Program compilation failed!
     goto error
