@@ -48,6 +48,12 @@ HBRUSH hBrushRed = NULL;
 HANDLE g_workerThread = NULL;
 volatile bool g_exitThread = false;
 
+// Cached scan code for E key (avoids repeated MapVirtualKey calls in hot path)
+BYTE g_eScanCode = 0;
+
+// Track whether timeBeginPeriod(1) was applied (for matching timeEndPeriod)
+bool g_timerResolutionSet = false;
+
 // Monitor enumeration data
 struct MonitorEnumData {
     int leftmostX = INT_MAX;
@@ -82,6 +88,18 @@ BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC, LPRECT lprcMonitor, LPARAM
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     const wchar_t CLASS_NAME[] = L"P2";
+
+    // Raise timer resolution to 1ms so Sleep() honors short delays precisely.
+    // Default Windows timer tick is ~15.625ms, which silently stretches our
+    // 10ms repeat interval to ~16ms. With 1ms resolution, Sleep(1) actually
+    // sleeps ~1ms, so the worker thread hits the intended 10ms interval.
+    // (Windows 10 2004+ scopes this per-process, so side effects are minimal.)
+    if (timeBeginPeriod(1) == TIMERR_NOERROR) {
+        g_timerResolutionSet = true;
+    }
+
+    // Cache the scan code once; MapVirtualKey in the hot path is wasted work.
+    g_eScanCode = (BYTE)MapVirtualKey('E', MAPVK_VK_TO_VSC);
 
     // Check for existing instance and terminate it
     HWND hwndExisting = FindWindowW(CLASS_NAME, L"P2");
@@ -216,6 +234,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         hWinEventHook = NULL;
     }
 
+    // Restore default timer resolution (must pair with timeBeginPeriod)
+    if (g_timerResolutionSet) {
+        timeEndPeriod(1);
+        g_timerResolutionSet = false;
+    }
+
     // GDI resources (font, brushes) are cleaned up in WM_DESTROY
 
     return 0;
@@ -337,28 +361,30 @@ void UpdateUI() {
 }
 
 void SendEKey() {
-    // Called ONLY from worker thread (never from hook callback)
-    // Injected keys are auto-flagged with LLKHF_INJECTED and skipped in hook
-    BYTE scanCode = (BYTE)MapVirtualKey('E', MAPVK_VK_TO_VSC);
-    keybd_event('E', scanCode, 0, 0);
-    keybd_event('E', scanCode, KEYEVENTF_KEYUP, 0);
+    // Called ONLY from worker thread (never from hook callback).
+    // Injected keys are auto-flagged with LLKHF_INJECTED and skipped in hook.
+    // Uses cached scan code to avoid MapVirtualKey in the hot path.
+    keybd_event('E', g_eScanCode, 0, 0);
+    keybd_event('E', g_eScanCode, KEYEVENTF_KEYUP, 0);
 }
 
 // Worker thread: polls the isEPressed flag and sends E key at fixed interval.
 // This thread is COMPLETELY decoupled from the hook callback, so hook chain
 // re-entry (caused by keybd_event calls) does not freeze the input pipeline.
+// With timeBeginPeriod(1) active, Sleep(1) is actually ~1ms, so the 10-step
+// sub-sleep loop delivers a real 10ms cadence and reacts to E-up within 1ms.
 DWORD WINAPI WorkerThreadProc(LPVOID) {
     while (!g_exitThread) {
         if (isEPressed && isEnabled) {
             SendEKey();
-            // Sleep for the repeat interval (breaks early if exit requested)
+            // Precise 10ms wait, breakable on E up / disable / exit
             for (int i = 0; i < E_KEY_INTERVAL && !g_exitThread; i++) {
                 Sleep(1);
-                if (!isEPressed || !isEnabled) break; // Stop immediately on release
+                if (!isEPressed || !isEnabled) break;
             }
         } else {
-            // Idle poll: 2ms gives near-instant response when E is pressed
-            Sleep(2);
+            // Idle poll: 1ms gives near-instant response when E is pressed
+            Sleep(1);
         }
     }
     return 0;
