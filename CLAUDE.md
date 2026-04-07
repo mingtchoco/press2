@@ -43,7 +43,11 @@ build.bat
 ## 에러 로그
 <!-- 형식: | 날짜 | 에러 | 원인 | 해결책 | -->
 
-(없음)
+### 2026-04-08 - timeBeginPeriod(1) 적용 후 LoL 인게임 렉 발생
+- **증상**: worker thread 구조는 유지한 채 `timeBeginPeriod(1)` + worker idle `Sleep(1)`로 속도 최적화했더니 LoL 인게임 프레임 렉 발생
+- **원인 [High]**: `timeBeginPeriod(1)`가 시스템 타이머 해상도를 1ms로 상승시켜 스케줄러 틱 빈도 급증. 거기에 worker thread가 초당 ~1000회 wake up하면서 게임 렌더 스레드의 프레임 페이싱을 교란. Windows 10 2004+의 per-process 스코프로도 게임 타이밍 민감도를 완전히 격리하지 못함
+- **해결**: `ee05c54` 시점의 `autokey_e.cpp` / `build.bat`으로 롤백. worker thread 구조와 10ms 반복 간격은 유지하되 `timeBeginPeriod`는 사용하지 않음 (실질 반복 간격 ~16ms로 조금 느려지지만 게임 렉 없음)
+- **교훈**: 게임과 같은 프로세스 스케줄링에 민감한 타겟에 대해서는 시스템 타이머 해상도 변경을 지양. 기본 Sleep 정밀도를 수용하는 것이 안전
 
 ## 패턴 기록
 <!-- 유용한 패턴, 해결책 기록 -->
@@ -52,8 +56,8 @@ build.bat
 - 기존 인스턴스 종료: `FindWindowW` + `SendMessage(WM_CLOSE)` + 강제 종료 fallback
 - Hook 콜백은 플래그 조작만 수행: 키 전송은 worker thread로 위임 (hook callback 안에서 keybd_event 호출 시 hook chain 재진입 → 시스템 프리즈)
 - WM_TIMER 핸들러에서 SetTimer 재호출 불필요: 같은 ID의 타이머는 자동 반복
-- Windows `Sleep()` 기본 정밀도는 ~15.6ms. `timeBeginPeriod(1)` 호출 시 1ms 정밀도 확보 (짝 맞춰 `timeEndPeriod(1)` 필수, `-lwinmm` 링크)
-- 핫 패스에서 `MapVirtualKey` 반복 호출 피하기: 초기화 시 scan code 캐싱
+- Windows `Sleep()` 기본 정밀도는 ~15.6ms. 게임 대상 유틸에서는 `timeBeginPeriod(1)` 사용 금지 (LoL 인게임 프레임 스케줄링 교란 확인됨, 2026-04-08 에러 로그 참조). 기본 정밀도 수용
+- 핫 패스에서 `MapVirtualKey` 반복 호출은 마이크로 최적화 수준 — 구조적 문제 아니면 건드리지 않음
 
 ## 학습 사항
 <!-- 세션별 학습 내용 -->
@@ -65,6 +69,5 @@ build.bat
 
 ### 2026-04-08
 - 최종 안정 구조: hook callback은 `isEPressed` 플래그만 조작, worker thread가 플래그 폴링 + `keybd_event` 전송. Hook 재진입과 키 전송이 완전 분리되어 장시간 반복에도 프리즈 없음
-- 속도 향상: `timeBeginPeriod(1)` 적용으로 `Sleep(1)` 실제 정밀도 ~15.6ms → ~1ms. 10ms 반복 간격이 실측 ~16ms에서 ~10ms로 개선 (초당 64회 → 100회, +56%)
-- 첫 E 응답 지연: idle poll `Sleep(2)` → `Sleep(1)`로 단축, 실제 ~15ms → ~1ms
-- 마이크로 최적화: scan code 전역 캐싱으로 SendEKey 호출 시 MapVirtualKey 제거
+- 속도 최적화 시도 후 롤백: `timeBeginPeriod(1)` + idle `Sleep(1)` 조합이 LoL 인게임 렉 유발 → `ee05c54` 시점으로 롤백. Sleep 실측 정밀도 ~16ms 수용이 게임 호환성 면에서 최적
+- 교훈: "조금만 더 빠르게"라는 최적화는 게임 타이밍에 영향을 주지 않는 범위에서만 유효. 시스템 타이머 해상도 변경은 게임 대상 유틸에서 피해야 함
