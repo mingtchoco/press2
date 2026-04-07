@@ -50,9 +50,10 @@ build.bat
 
 - Low-Level Keyboard Hook에서 자신이 보낸 키 차단 방지: `LLKHF_INJECTED` 플래그 체크 (isSendingKey 플래그는 SendInput과 타이밍 문제 발생)
 - 기존 인스턴스 종료: `FindWindowW` + `SendMessage(WM_CLOSE)` + 강제 종료 fallback
-- Hook 콜백에서 절대 Sleep/무거운 작업 금지: PostMessage로 비동기 처리
-- keybd_event 대신 SendInput 사용: down+up을 하나의 호출로 원자적 전송
+- Hook 콜백은 플래그 조작만 수행: 키 전송은 worker thread로 위임 (hook callback 안에서 keybd_event 호출 시 hook chain 재진입 → 시스템 프리즈)
 - WM_TIMER 핸들러에서 SetTimer 재호출 불필요: 같은 ID의 타이머는 자동 반복
+- Windows `Sleep()` 기본 정밀도는 ~15.6ms. `timeBeginPeriod(1)` 호출 시 1ms 정밀도 확보 (짝 맞춰 `timeEndPeriod(1)` 필수, `-lwinmm` 링크)
+- 핫 패스에서 `MapVirtualKey` 반복 호출 피하기: 초기화 시 scan code 캐싱
 
 ## 학습 사항
 <!-- 세션별 학습 내용 -->
@@ -61,3 +62,9 @@ build.bat
 - E키 부하/렉 원인: Hook 콜백에서 Sleep(1) + keybd_event 동기 호출이 메시지 큐 축적 유발
 - 해결: Sleep 제거, keybd_event->SendInput, Hook에서 PostMessage 비동기 처리로 전환
 - SendInput + isSendingKey 플래그 타이밍 문제: SendInput은 비동기적으로 hook 트리거하므로 플래그가 false가 된 후 hook이 호출됨. LLKHF_INJECTED 플래그로 해결
+
+### 2026-04-08
+- 최종 안정 구조: hook callback은 `isEPressed` 플래그만 조작, worker thread가 플래그 폴링 + `keybd_event` 전송. Hook 재진입과 키 전송이 완전 분리되어 장시간 반복에도 프리즈 없음
+- 속도 향상: `timeBeginPeriod(1)` 적용으로 `Sleep(1)` 실제 정밀도 ~15.6ms → ~1ms. 10ms 반복 간격이 실측 ~16ms에서 ~10ms로 개선 (초당 64회 → 100회, +56%)
+- 첫 E 응답 지연: idle poll `Sleep(2)` → `Sleep(1)`로 단축, 실제 ~15ms → ~1ms
+- 마이크로 최적화: scan code 전역 캐싱으로 SendEKey 호출 시 MapVirtualKey 제거
