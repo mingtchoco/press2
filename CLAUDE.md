@@ -16,10 +16,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **출력**: `autokey_e.exe` (git에 추적됨 — "빌드 산출물 커밋" 참조)
 
 ### 동작
-- E키를 누르고 있는 동안 worker 스레드가 E를 반복 전송 (원본 E는 hook에서 차단). **실측 반복 주기 ~31ms = 약 32회/초** (2026-08-03에 `E_KEY_INTERVAL` 10→2로 상향) — "타이밍" 절의 수치를 먼저 읽을 것
+- **Q/W/E/R 중 선택한 키**를 누르고 있는 동안 worker 스레드가 그 키를 반복 전송 (원본 키는 hook에서 차단). 여러 키를 동시에 누르면 각각 **전부 같은 주기로** 나간다(분할 아님)
+- 기본 선택은 E 하나. R은 궁극기라 기본 꺼짐이며 켤 때 확인 대화상자를 띄운다
+- **실측 반복 주기 ~31ms = 약 32회/초** (2026-08-03에 `E_KEY_INTERVAL` 10→2로 상향) — "타이밍" 절의 수치를 먼저 읽을 것
 - F2: 활성화 / F3: 비활성화. 두 키는 **무조건·전역으로 소비**되어 다른 앱에 전달되지 않는다 ("전역 키 소비 범위" 참조)
 - LoL 포그라운드 진입 시 자동 ON, 이탈 시 자동 OFF. **F2/F3 수동 토글은 다음 포그라운드 전환까지만 유지된다** (아래 "함정" 참조)
-- 항상 위(topmost) 90x90 소형 창, 가장 왼쪽 모니터 좌상단, 작업표시줄 미표시
+- 항상 위(topmost) 90x125 소형 창(클라이언트 84x96), 가장 왼쪽 모니터 좌상단, 작업표시줄 미표시. 창 아래쪽 `Q W E R` 칸을 클릭해 키를 켜고 끈다
+
+### 키 선택과 설정 파일
+- 상태는 `g_keys[KEY_COUNT]`(autokey_e.cpp 상단 `KeyEntry` 배열) 하나에 모여 있다. 키를 추가하려면 이 배열에 항목을 넣고 `KEY_COUNT`를 늘리면 되며, hook·worker·그리기 모두 배열을 순회하므로 다른 곳은 손댈 필요가 없다. 단 창 폭(`KEY_CELL_W * KEY_COUNT`)이 클라이언트 84px를 넘지 않는지 확인할 것
+- 선택은 exe 옆 `autokey_e.ini`(`[Keys]` 섹션, `Q`/`W`/`E`/`R` = `0`/`1`)에 저장되고 시작 시 창 생성 전에 읽는다. `.gitignore`에 등록돼 있으니 커밋되지 않는다
+- 토글 클릭은 `WM_LBUTTONDOWN`에서 처리한다. R 확인용 `MessageBoxW`는 자체 메시지 루프를 돌리므로 대화상자가 떠 있는 동안에도 저수준 훅은 계속 서비스된다 — 훅 콜백 안이 아니라 `WindowProc` 안이라 허용되는 것이며, 훅 콜백에는 절대 모달 UI를 넣지 말 것
+- 토글 행은 STATIC 컨트롤이 아니라 `WM_PAINT`에서 직접 그린다(`DrawKeyRow`). 클릭 판정은 `HitTestKeyCell`의 좌표 계산이므로 레이아웃 상수를 바꾸면 두 함수가 함께 따라가야 한다
 
 ---
 
@@ -80,13 +88,13 @@ build.bat
 1. 메인 스레드 쪽 셋 사이에는 경합이 없으므로 락/동기화를 추가하지 말 것(실제로 파일 전체에 크리티컬 섹션·뮤텍스가 0건). 반대로 셋 중 하나가 느려지면 나머지가 같이 밀린다 — 특히 `WinEventProc`는 `IsLeagueOfLegendsWindow` → `OpenProcess` + `GetModuleFileNameExW`(autokey_e.cpp:371,378)라는 무거운 호출을 하므로 그동안 키보드 훅 처리가 지연되고, `LowLevelHooksTimeout`(기본 ~300ms)을 넘기면 해당 키의 차단이 조용히 건너뛰어지거나 훅 자체가 해제될 수 있다.
 2. 진짜 경계는 "메인 스레드 ↔ worker 스레드"이며, `volatile bool` 플래그가 유일한 교차 스레드 통신 수단이다. 키 전송이 worker에만 있어야 하는 이유가 이 경계다 — 넘으면 hook chain 재진입으로 입력 파이프라인이 프리즈한다.
 
-### volatile 플래그 3종이 안전한 실제 이유
-`isEnabled` / `isEPressed` / `g_exitThread`(autokey_e.cpp:42-43,49)는 `volatile`일 뿐 C++ 표준의 스레드 동기화 수단이 아니다(MinGW g++ 빌드라 MSVC의 `/volatile:ms` 획득/해제 의미론도 없다). 그럼에도 깨지지 않는 이유는 **모든 쓰기가 메인 스레드에서만 일어나는 단일 writer 구조**이기 때문이다 — 쓰기 지점은 WinMain(180,186,200,201), hook 콜백(300,301,305,306,314,322), WinEventProc(430,436,437)뿐이고 셋 다 메인 스레드다. worker(350-365)는 351,352,355,357에서 읽기만 한다.
+### volatile 플래그가 안전한 실제 이유
+교차 스레드 상태는 전역 `isEnabled` / `g_exitThread`와 `g_keys[]` 각 항목의 `selected` / `pressed` / `weBlockedDown`이 전부다. 모두 `volatile`일 뿐 C++ 표준의 스레드 동기화 수단이 아니다(MinGW g++ 빌드라 MSVC의 `/volatile:ms` 획득/해제 의미론도 없다). 그럼에도 깨지지 않는 이유는 **모든 쓰기가 메인 스레드에서만 일어나는 단일 writer 구조**이기 때문이다 — 쓰기 지점은 `WinMain` / `LowLevelKeyboardProc` / `WinEventProc` / `WindowProc`(토글 클릭)뿐이고 넷 다 메인 스레드에서 실행된다. `WorkerThreadProc`는 읽기만 한다.
 
 지켜야 할 불변식:
-- worker 스레드에서 이 플래그들에 **쓰지 말 것**. 전송 후 정리 목적으로 `isEPressed = false`를 worker에 넣으면 단일 writer 전제가 깨진다.
-- 두 플래그를 원자적으로 함께 읽어야 하는 복합 불변식을 만들지 말 것. 현재 `autokey_e.cpp:352`의 `isEPressed && isEnabled`는 순간적으로 불일치 조합을 볼 수 있으나 최악이 E 1회 추가 전송이라 무해하다.
-- 둘 중 하나라도 어겨야 하면 임시방편 대신 `std::atomic<bool>`로 교체하는 것이 정답이다.
+- worker 스레드에서 이 플래그들에 **쓰지 말 것**. 전송 후 정리 목적으로 `pressed = false`를 worker에 넣으면 단일 writer 전제가 깨진다.
+- 여러 플래그를 원자적으로 함께 읽어야 하는 복합 불변식을 만들지 말 것. worker의 `selected && pressed` 검사는 순간적으로 불일치 조합을 볼 수 있으나 최악이 키 1회 추가 전송이라 무해하다.
+- 어겨야 하면 임시방편 대신 `std::atomic<bool>`로 교체하는 것이 정답이다.
 
 ### 재진입 차단
 worker가 보낸 E는 hook 최상단(autokey_e.cpp:292-295)의 `LLKHF_INJECTED` 체크로 즉시 통과시킨다. **이 체크를 빼면 생기는 문제는 무한 재귀가 아니라 기능 무력화다** — injected E down이 autokey_e.cpp:321-323에서 다시 `return 1`로 차단돼 게임에 닿지 않고, 뒤이은 injected E up이 autokey_e.cpp:313-314에서 `isEPressed`를 지워 반복이 매 tick 끊긴다. 재귀·프리즈는 hook 콜백 **안에서** `keybd_event`를 부르던 과거 구조의 증상이며, 현재는 키 전송이 worker에만 있어 재귀 경로 자체가 없다.
@@ -103,7 +111,7 @@ hook이 `return 1`을 반환하면 원본 키가 시스템으로 전달되지 �
 
 `UpdateUI()` 직접 호출 지점은 이 초기화 경로(autokey_e.cpp:189)와 `WM_APP+1` 핸들러(autokey_e.cpp:259) 둘뿐이므로, `isEnabled`를 바꾸는 코드를 새로 추가할 때는 `PostMessage(hMainWnd, WM_APP + 1, 0, 0)`을 반드시 함께 넣어야 UI가 따라간다.
 
-`UpdateUI`에는 상태 변화 가드가 있다(`static int lastState`, 초기값 -1). 전체 다시 그리기 1회가 실측 ~126us(최대 ~1.2ms)이고 그 시간만큼 훅을 서비스하는 메인 스레드를 점유하므로, ON/OFF가 실제로 바뀔 때만 그린다. **ON/OFF 외의 표시를 추가하면 이 가드가 그 변화를 삼킨다** — 가드 조건에 새 상태를 반드시 포함시킬 것.
+`UpdateUI`에는 상태 변화 가드가 있다(`static int lastState`, 초기값 -1). 전체 다시 그리기 1회가 실측 ~126us(최대 ~1.2ms)이고 그 시간만큼 훅을 서비스하는 메인 스레드를 점유하므로, 표시가 실제로 바뀔 때만 그린다. 현재 가드는 `isEnabled` 1비트 + Q/W/E/R 선택 4비트를 합친 값을 비교한다. **창에 새 표시를 추가하면 이 가드가 그 변화를 삼키므로 반드시 가드 값에 포함시킬 것.**
 
 ### 종료 순서 (훅 해제가 뒤에 있다)
 종료 경로는 메시지 루프 종료(autokey_e.cpp:194-197) → worker 조인(:203, 상한 1000ms) → 훅 해제(:209-217) 순이다. `WH_KEYBOARD_LL` 콜백은 설치 스레드의 메시지 펌프로 배달되므로 이 구간은 **훅이 걸려 있는데 아무도 서비스하지 않는** 상태다 — 키 입력마다 `LowLevelHooksTimeout`을 기다린 뒤에야 무시되며 그동안 시스템 전체 입력이 지연된다. 지금은 worker가 매 tick `g_exitThread`를 확인해 금방 빠져나가므로 체감되지 않을 뿐이다. 종료 경로에 대기·정리 작업을 추가하면 즉시 "끌 때 키보드가 멈춘다"로 나타나므로 새 정리 코드는 `UnhookWindowsHookEx` **뒤**에 넣거나 훅 해제를 조인 앞으로 옮길 것. (autokey_e.cpp:208의 `Cleanup resources in proper order` 주석은 이 점에서 신뢰하지 말 것.)
@@ -145,8 +153,12 @@ hook이 `return 1`을 반환하면 원본 키가 시스템으로 전달되지 �
 ### F2/F3 수동 토글은 다음 포그라운드 전환까지만 유지된다
 `WinEventProc`(autokey_e.cpp:427-440)가 창이 바뀔 때마다 LoL 여부만 보고 `isEnabled`를 무조건 재설정하고, F2/F3(:300-301, :305-306)는 수동 오버라이드 플래그를 남기지 않는다. 따라서 LoL에서 F3로 꺼도 다른 창에 갔다 돌아오면 다시 ON이 되고, LoL이 아닌 앱에서 F2로 켜면 다음 전환에서 OFF로 돌아간다. "F3로 껐는데 다시 켜진다"는 버그가 아니라 설계 결과이며, 영구 수동 오버라이드가 필요하면 별도 플래그를 도입해야 한다.
 
-### E keyup 차단 조건의 비대칭 (stuck key)
-E keydown 차단은 "누른 시점의 `isEnabled`"(autokey_e.cpp:321), keyup 차단은 "뗀 시점의 `isEnabled`"(:313-318)로 각각 결정된다 — "그 down을 우리가 차단했는가"를 기억하는 상태가 없다. `isEnabled`는 E를 누르고 있는 도중에도 켜질 수 있으므로(F2: :300, LoL 포그라운드 진입: :429-431), OFF 상태에서 눌린 원본 E down은 이미 앱에 전달됐는데 뒤이은 up만 삼켜져 대상 앱이 E를 눌린 채로 인식할 수 있다. 보통은 이어지는 키 반복 keydown과 worker의 injected down/up 쌍이 상태를 풀어주지만, F2로 켠 경우는 F2가 키 반복 대상을 가져가 복구가 일어나지 않을 수 있다 [Medium]. 근본 수정은 "이 down을 차단했다"를 별도 플래그로 기억하는 것이다.
+### keyup 차단 비대칭 (stuck key) — 2026-08-03 해결됨
+과거에는 keydown 차단이 "누른 시점의 `isEnabled`", keyup 차단이 "뗀 시점의 `isEnabled`"로 각각 결정돼, 키를 누르고 있는 도중 앱이 켜지면(F2 또는 LoL 포그라운드 진입) 원본 down은 이미 앱에 전달됐는데 up만 삼켜져 대상 앱이 키를 눌린 채로 인식할 수 있었다.
+
+다중 키 확장과 함께 `KeyEntry::weBlockedDown`으로 해결했다 — **우리가 그 keydown을 삼켰을 때만 대응하는 keyup을 삼킨다.** 이 플래그는 `ClearPressedKeys()`가 건드리지 않는다(이미 삼킨 down에 대한 up은 여전히 우리가 갚아야 하므로). 키 처리 로직을 고칠 때 이 대칭을 깨지 말 것.
+
+주의: 이 경로는 **자동 테스트가 불가능하다**. hook이 `LLKHF_INJECTED`를 최상단에서 통과시키므로 합성 입력으로는 재현되지 않으며, 물리적으로 키를 누른 채 F2를 눌러야 검증된다.
 
 ### 실패는 무증상이다
 `RegisterClassW`(:122), `SetWindowsHookEx`(:166), `SetWinEventHook`(:169), `CreateThread`(:181) 모두 반환값을 검사하지 않고, 저장소 전체에 `MessageBox`·로그·`GetLastError` 호출이 0건이다. 창 생성 실패조차 조용히 `return 0`(:142-144). **UI의 ON/OFF는 훅이 살아 있다는 증거가 아니다** — 실행 시 LoL이 포그라운드면 키보드 훅이 죽어 있어도 ON으로 표시된다(:185-189).
@@ -278,6 +290,13 @@ E 연타 중 스킬이 안 나가는 증상은 이 앱의 재발 가능한 핵�
 - 최종 안정 구조: hook callback은 `isEPressed` 플래그만 조작, worker thread가 플래그 폴링 + `keybd_event` 전송. Hook 재진입과 키 전송이 완전 분리되어 장시간 반복에도 프리즈 없음
 - 속도 최적화 시도 후 롤백: `timeBeginPeriod(1)` 조합이 LoL 인게임 렉 유발 → `ee05c54` 시점으로 롤백
 - 교훈: "조금만 더 빠르게"라는 최적화는 게임 타이밍에 영향을 주지 않는 범위에서만 유효
+
+### 2026-08-03 (Q/W/E/R 다중 키 확장)
+- 단일 `isEPressed` bool → `KeyEntry g_keys[]` 배열로 전환. hook·worker·그리기가 전부 배열을 순회하므로 키를 늘릴 때 손댈 곳은 배열과 `KEY_COUNT`뿐이다
+- 확장하면서 stuck key 비대칭을 `weBlockedDown`으로 함께 해소했다. 키가 1개에서 4개로 늘면 같은 함정도 4배가 되므로, 구조를 바꾸는 김에 고치는 것이 자연스러웠다
+- 동시 홀드 정책은 **분할이 아니라 병렬**로 정했다. Q와 E를 같이 누르면 각각 32회/초씩 나간다(합쳐서 32회/초로 나누지 않음). 게임 입력 파이프라인 부하는 선택한 키 수에 비례한다
+- R 확인 대화상자를 `WindowProc`에 두었다. 훅 콜백이 아니라 `WM_LBUTTONDOWN` 안이고 `MessageBoxW`가 자체 메시지 루프를 돌리므로 훅이 계속 서비스된다 — 같은 코드를 훅 콜백에 넣으면 안 된다
+- 검증 방법: `PostMessage(WM_LBUTTONDOWN)`으로 셀 좌표를 찍어 토글·ini 저장·재시작 유지·확인 대화상자 출현까지 자동 검증했다. 반대로 **키 처리 경로 자체는 자동 검증 불가**(`LLKHF_INJECTED` 때문에 합성 입력이 훅을 통과)
 
 ### 2026-08-03 (성능 최적화)
 - **wake 불변식 발견이 이 프로젝트 성능 논의의 핵심**: `E_KEY_INTERVAL`은 worker의 wake 빈도를 바꾸지 않는다(전 구간 ~64.7회/초 고정). 이걸 몰랐기 때문에 2026-04-08에 "더 빠르게"를 `timeBeginPeriod`로 풀려다 렉이 났다. 상수만 낮췄으면 스케줄러 부하 증가 없이 같은 목적을 달성할 수 있었다

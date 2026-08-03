@@ -8,18 +8,26 @@
 
 // Window dimensions
 constexpr int WINDOW_WIDTH = 90;
-constexpr int WINDOW_HEIGHT = 90;
+constexpr int WINDOW_HEIGHT = 125;
 
-// UI layout
-constexpr int LABEL_X = 5;
-constexpr int LABEL_Y = 15;
+// UI layout - status label
+constexpr int LABEL_X = 2;
+constexpr int LABEL_Y = 4;
 constexpr int LABEL_WIDTH = 70;
-constexpr int LABEL_HEIGHT = 35;
+constexpr int LABEL_HEIGHT = 30;
+
+// UI layout - per-key toggle row (owner drawn, click a cell to toggle it)
+constexpr int KEY_COUNT = 4;
+constexpr int KEY_ROW_X = 2;
+constexpr int KEY_ROW_Y = 42;
+constexpr int KEY_CELL_W = 17;
+constexpr int KEY_CELL_H = 30;
 
 // Font settings
-constexpr int FONT_SIZE = 24;
+constexpr int FONT_SIZE = 22;
+constexpr int KEY_FONT_SIZE = 16;
 
-// Number of Sleep(1) calls between E key sends while held. NOT milliseconds.
+// Number of Sleep(1) calls between key sends while held. NOT milliseconds.
 // timeBeginPeriod is never used, so one Sleep(1) costs a full timer tick
 // (~15.5ms measured). Repeat period ~= E_KEY_INTERVAL * 15.5ms.
 // Measured: 10 -> 6.47/s, 3 -> 21.6/s, 2 -> 32.4/s, 1 -> 64.4/s (structural cap).
@@ -37,6 +45,33 @@ constexpr COLORREF ENABLED_BG_COLOR = RGB(240, 255, 240);   // Soft mint
 constexpr COLORREF DISABLED_BG_COLOR = RGB(248, 248, 248);  // Light gray
 constexpr COLORREF ENABLED_TEXT_COLOR = RGB(34, 139, 34);   // Forest green
 constexpr COLORREF DISABLED_TEXT_COLOR = RGB(128, 128, 128); // Gray
+constexpr COLORREF KEY_ON_BG_COLOR = RGB(34, 139, 34);      // Selected key
+constexpr COLORREF KEY_WARN_BG_COLOR = RGB(198, 88, 28);    // Selected + needs confirm (R)
+constexpr COLORREF KEY_OFF_BG_COLOR = RGB(214, 214, 214);   // Unselected key
+constexpr COLORREF KEY_ON_TEXT_COLOR = RGB(255, 255, 255);
+constexpr COLORREF KEY_OFF_TEXT_COLOR = RGB(120, 120, 120);
+
+// Per-key state.
+// EVERY field here is written ONLY from the main thread - the hook callback,
+// WinEventProc and WindowProc all run on the thread that installed the hook,
+// and so does WinMain. The worker thread only ever reads. That single-writer
+// rule is what makes plain volatile bool safe; never write these from the worker.
+struct KeyEntry {
+    DWORD vk;                     // virtual key code
+    const wchar_t* label;         // text drawn in the toggle row, also the .ini key name
+    bool needsConfirm;            // ask before turning on (R fires ultimates on cooldown)
+    volatile bool selected;       // user turned this key on
+    volatile bool pressed;        // physically held right now
+    volatile bool weBlockedDown;  // we swallowed the keydown, so we must swallow the keyup
+};
+
+// E defaults on to preserve the original behaviour. R defaults off on purpose.
+KeyEntry g_keys[KEY_COUNT] = {
+    { 'Q', L"Q", false, false, false, false },
+    { 'W', L"W", false, false, false, false },
+    { 'E', L"E", false, true,  false, false },
+    { 'R', L"R", true,  false, false, false },
+};
 
 // Global variables
 HWND hMainWnd = NULL;
@@ -44,10 +79,11 @@ HWND hStatusLabel = NULL;
 HHOOK hKeyboardHook = NULL;
 HWINEVENTHOOK hWinEventHook = NULL;  // For League of Legends detection
 HFONT hFontStatus = NULL;  // Track font resource
+HFONT hFontKey = NULL;     // Font for the toggle row
 volatile bool isEnabled = false;
-volatile bool isEPressed = false;
 HBRUSH hBrushGreen = NULL;
 HBRUSH hBrushRed = NULL;
+wchar_t g_iniPath[MAX_PATH] = {0};  // settings file, next to the exe
 
 // Worker thread for key sending (decoupled from hook callback to prevent freezes)
 HANDLE g_workerThread = NULL;
@@ -69,7 +105,103 @@ DWORD WINAPI WorkerThreadProc(LPVOID lpParam);
 bool IsLeagueOfLegendsWindow(HWND hwnd);
 bool IsLeagueOfLegendsProcess(DWORD processId);
 void UpdateUI();
-void SendEKey();
+void SendKey(DWORD vk);
+void ClearPressedKeys();
+bool AnyKeyActive();
+void InitIniPath();
+void LoadSettings();
+void SaveSettings();
+int  HitTestKeyCell(int x, int y);
+void DrawKeyRow(HDC hdc);
+
+// Clear the physical-hold flags. Deliberately leaves weBlockedDown alone:
+// if we already swallowed a keydown we still owe the target app its keyup.
+void ClearPressedKeys() {
+    for (int i = 0; i < KEY_COUNT; i++) {
+        g_keys[i].pressed = false;
+    }
+}
+
+bool AnyKeyActive() {
+    for (int i = 0; i < KEY_COUNT; i++) {
+        if (g_keys[i].selected && g_keys[i].pressed) return true;
+    }
+    return false;
+}
+
+// Settings live in autokey_e.ini next to the exe.
+void InitIniPath() {
+    if (GetModuleFileNameW(NULL, g_iniPath, MAX_PATH) == 0) {
+        g_iniPath[0] = 0;
+        return;
+    }
+    size_t len = wcslen(g_iniPath);
+    if (len > 4 && lstrcmpiW(g_iniPath + len - 4, L".exe") == 0) {
+        wcscpy(g_iniPath + len - 4, L".ini");
+    } else if (len + 4 < MAX_PATH) {
+        wcscat(g_iniPath, L".ini");
+    } else {
+        g_iniPath[0] = 0;
+    }
+}
+
+void LoadSettings() {
+    if (!g_iniPath[0]) return;
+    for (int i = 0; i < KEY_COUNT; i++) {
+        UINT v = GetPrivateProfileIntW(L"Keys", g_keys[i].label,
+                                       g_keys[i].selected ? 1 : 0, g_iniPath);
+        g_keys[i].selected = (v != 0);
+    }
+}
+
+void SaveSettings() {
+    if (!g_iniPath[0]) return;
+    for (int i = 0; i < KEY_COUNT; i++) {
+        WritePrivateProfileStringW(L"Keys", g_keys[i].label,
+                                   g_keys[i].selected ? L"1" : L"0", g_iniPath);
+    }
+}
+
+// Returns the index of the toggle cell at (x, y) in client coords, or -1.
+int HitTestKeyCell(int x, int y) {
+    if (y < KEY_ROW_Y || y >= KEY_ROW_Y + KEY_CELL_H) return -1;
+    if (x < KEY_ROW_X) return -1;
+    int idx = (x - KEY_ROW_X) / KEY_CELL_W;
+    if (idx < 0 || idx >= KEY_COUNT) return -1;
+    return idx;
+}
+
+void DrawKeyRow(HDC hdc) {
+    HFONT prevFont = NULL;
+    if (hFontKey) prevFont = (HFONT)SelectObject(hdc, hFontKey);
+    SetBkMode(hdc, TRANSPARENT);
+
+    for (int i = 0; i < KEY_COUNT; i++) {
+        RECT cell;
+        cell.left = KEY_ROW_X + i * KEY_CELL_W;
+        cell.top = KEY_ROW_Y;
+        cell.right = cell.left + KEY_CELL_W - 1;
+        cell.bottom = cell.top + KEY_CELL_H;
+
+        COLORREF bg = KEY_OFF_BG_COLOR;
+        COLORREF fg = KEY_OFF_TEXT_COLOR;
+        if (g_keys[i].selected) {
+            bg = g_keys[i].needsConfirm ? KEY_WARN_BG_COLOR : KEY_ON_BG_COLOR;
+            fg = KEY_ON_TEXT_COLOR;
+        }
+
+        HBRUSH cellBrush = CreateSolidBrush(bg);
+        if (cellBrush) {
+            FillRect(hdc, &cell, cellBrush);
+            DeleteObject(cellBrush);
+        }
+        SetTextColor(hdc, fg);
+        DrawTextW(hdc, g_keys[i].label, -1, &cell,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    if (prevFont) SelectObject(hdc, prevFont);
+}
 
 // Monitor enumeration callback to find leftmost monitor
 BOOL CALLBACK MonitorEnumProc(HMONITOR, HDC, LPRECT lprcMonitor, LPARAM dwData) {
@@ -87,6 +219,10 @@ BOOL CALLBACK MonitorEnumProc(HMONITOR, HDC, LPRECT lprcMonitor, LPARAM dwData) 
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     const wchar_t CLASS_NAME[] = L"P2";
+
+    // Load the key selection before the window exists so the first paint is correct
+    InitIniPath();
+    LoadSettings();
 
     // Check for existing instance and terminate it
     HWND hwndExisting = FindWindowW(CLASS_NAME, L"P2");
@@ -167,6 +303,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         SendMessage(hStatusLabel, WM_SETFONT, (WPARAM)hFontStatus, TRUE);
     }
 
+    // Font for the Q/W/E/R toggle row (drawn directly in WM_PAINT)
+    hFontKey = CreateFontW(
+        KEY_FONT_SIZE, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
+    );
+
     // Install low-level keyboard hook
     hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
 
@@ -203,7 +346,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // Signal worker thread to exit and wait for it
     g_exitThread = true;
-    isEPressed = false;
+    ClearPressedKeys();
     if (g_workerThread) {
         WaitForSingleObject(g_workerThread, 1000);
         CloseHandle(g_workerThread);
@@ -264,6 +407,45 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             UpdateUI();
             break;
 
+        case WM_PAINT:
+            {
+                PAINTSTRUCT ps;
+                HDC hdc = BeginPaint(hwnd, &ps);
+                DrawKeyRow(hdc);
+                EndPaint(hwnd, &ps);
+            }
+            return 0;
+
+        case WM_LBUTTONDOWN:
+            {
+                int idx = HitTestKeyCell((short)LOWORD(lParam), (short)HIWORD(lParam));
+                if (idx < 0) break;
+
+                KeyEntry& key = g_keys[idx];
+                if (!key.selected && key.needsConfirm) {
+                    // MessageBox runs its own message loop, so the low-level
+                    // keyboard hook keeps being serviced while it is up.
+                    wchar_t prompt[320];
+                    wsprintfW(prompt,
+                        L"%s 키를 자동 반복 대상으로 켭니다.\n\n"
+                        L"궁극기처럼 쿨다운이 도는 순간 바로 발동하는 스킬은\n"
+                        L"의도하지 않은 타이밍에 나갈 수 있습니다.\n\n"
+                        L"계속할까요?", key.label);
+                    if (MessageBoxW(hwnd, prompt, L"P2",
+                                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+                        return 0;
+                    }
+                }
+
+                key.selected = !key.selected;
+                if (!key.selected) {
+                    key.pressed = false;
+                }
+                SaveSettings();
+                UpdateUI();
+            }
+            return 0;
+
         case WM_DESTROY:
             // Clean up brushes
             if (hBrushGreen) {
@@ -275,10 +457,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 hBrushRed = NULL;
             }
 
-            // Clean up font
+            // Clean up fonts
             if (hFontStatus) {
                 DeleteObject(hFontStatus);
                 hFontStatus = NULL;
+            }
+            if (hFontKey) {
+                DeleteObject(hFontKey);
+                hFontKey = NULL;
             }
 
             PostQuitMessage(0);
@@ -299,33 +485,48 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
         }
 
+        const bool isDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+        const bool isUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+
         // Handle F2 and F3 keys for enable/disable (flag-only, no UI calls)
-        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+        if (isDown) {
             if (pKeyboard->vkCode == VK_F2) {
                 isEnabled = true;
-                isEPressed = false;
+                ClearPressedKeys();
                 PostMessage(hMainWnd, WM_APP + 1, 0, 0); // Request UI update
                 return 1;
             } else if (pKeyboard->vkCode == VK_F3) {
                 isEnabled = false;
-                isEPressed = false;
+                ClearPressedKeys();
                 PostMessage(hMainWnd, WM_APP + 1, 0, 0); // Request UI update
                 return 1;
             }
         }
 
-        // E key up: clear flag (worker thread will stop on next poll)
-        if (pKeyboard->vkCode == 'E' && (wParam == WM_KEYUP || wParam == WM_SYSKEYUP)) {
-            isEPressed = false;
-            if (isEnabled) {
-                return 1; // Block original E up
-            }
-        }
+        for (int i = 0; i < KEY_COUNT; i++) {
+            KeyEntry& key = g_keys[i];
+            if (pKeyboard->vkCode != key.vk) continue;
 
-        // E key down: set flag (worker thread will start sending on next poll)
-        if (isEnabled && pKeyboard->vkCode == 'E' && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
-            isEPressed = true;
-            return 1; // Block original E down
+            if (isUp) {
+                key.pressed = false;
+                // Swallow the keyup ONLY if we swallowed the matching keydown.
+                // Deciding this from the current isEnabled instead would let the
+                // target app keep the key stuck down whenever the app is turned
+                // on while the key is already held.
+                if (key.weBlockedDown) {
+                    key.weBlockedDown = false;
+                    return 1;
+                }
+                break;
+            }
+
+            // Key down: set flag (worker thread starts sending on next poll)
+            if (isDown && isEnabled && key.selected) {
+                key.pressed = true;
+                key.weBlockedDown = true;
+                return 1;
+            }
+            break;
         }
     }
     return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
@@ -335,41 +536,57 @@ void UpdateUI() {
     // Repaint only when the state actually changed. One full repaint costs
     // ~126us (max ~1.2ms measured) and it runs on the same thread that services
     // the keyboard hook, so skipping no-op repaints keeps the hook responsive.
+    // The guard must cover EVERY value the window shows - master state and the
+    // Q/W/E/R selection - or a change to one of them would be silently swallowed.
     // Starts at -1 so the initial paint always happens.
     static int lastState = -1;
-    const int state = isEnabled ? 1 : 0;
+    int state = isEnabled ? 1 : 0;
+    for (int i = 0; i < KEY_COUNT; i++) {
+        if (g_keys[i].selected) state |= (2 << i);
+    }
     if (state == lastState) {
         return;
     }
     lastState = state;
 
-    SetWindowTextW(hStatusLabel, state ? L"ON" : L"OFF");
+    SetWindowTextW(hStatusLabel, isEnabled ? L"ON" : L"OFF");
     InvalidateRect(hMainWnd, NULL, TRUE);
     UpdateWindow(hMainWnd);
 }
 
-void SendEKey() {
+void SendKey(DWORD vk) {
     // Called ONLY from worker thread (never from hook callback)
     // Injected keys are auto-flagged with LLKHF_INJECTED and skipped in hook
-    BYTE scanCode = (BYTE)MapVirtualKey('E', MAPVK_VK_TO_VSC);
-    keybd_event('E', scanCode, 0, 0);
-    keybd_event('E', scanCode, KEYEVENTF_KEYUP, 0);
+    BYTE scanCode = (BYTE)MapVirtualKey(vk, MAPVK_VK_TO_VSC);
+    keybd_event((BYTE)vk, scanCode, 0, 0);
+    keybd_event((BYTE)vk, scanCode, KEYEVENTF_KEYUP, 0);
 }
 
-// Worker thread: polls the isEPressed flag and sends E key at fixed interval.
+// Worker thread: polls the per-key flags and sends every selected key that is
+// currently held, then waits one interval. Holding two keys therefore sends
+// both at the full rate rather than halving each.
 // This thread is COMPLETELY decoupled from the hook callback, so hook chain
 // re-entry (caused by keybd_event calls) does not freeze the input pipeline.
 DWORD WINAPI WorkerThreadProc(LPVOID) {
     while (!g_exitThread) {
-        if (isEPressed && isEnabled) {
-            SendEKey();
+        bool sentAny = false;
+        if (isEnabled) {
+            for (int i = 0; i < KEY_COUNT; i++) {
+                if (g_keys[i].selected && g_keys[i].pressed) {
+                    SendKey(g_keys[i].vk);
+                    sentAny = true;
+                }
+            }
+        }
+
+        if (sentAny) {
             // Sleep for the repeat interval (breaks early if exit requested)
             for (int i = 0; i < E_KEY_INTERVAL && !g_exitThread; i++) {
                 Sleep(1);
-                if (!isEPressed || !isEnabled) break; // Stop immediately on release
+                if (!isEnabled || !AnyKeyActive()) break; // Stop on release
             }
         } else {
-            // Idle poll: 2ms gives near-instant response when E is pressed
+            // Idle poll: one timer tick (~15.6ms) in practice
             Sleep(2);
         }
     }
@@ -454,7 +671,7 @@ VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         // Auto-disable when LoL loses focus
         if (isEnabled) {
             isEnabled = false;
-            isEPressed = false;
+            ClearPressedKeys();
             PostMessage(hMainWnd, WM_APP + 1, 0, 0);
         }
     }

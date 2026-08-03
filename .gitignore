@@ -4,6 +4,9 @@ nul.*
 NUL
 NUL.*
 
+# User settings written by the app next to the exe (Q/W/E/R selection)
+autokey_e.ini
+
 # Build artifacts
 *.o
 *.obj
