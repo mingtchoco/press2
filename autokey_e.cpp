@@ -6,26 +6,37 @@
 
 // Libraries are linked via build script (-lcomctl32 -luser32 -lpsapi)
 
-// Window dimensions
-constexpr int WINDOW_WIDTH = 90;
-constexpr int WINDOW_HEIGHT = 125;
+// UI layout. Everything below is derived from the content, and the window size
+// is computed from CLIENT_WIDTH/HEIGHT via AdjustWindowRectEx in WinMain - so
+// the client area is exactly the content with no leftover margin. Do not go
+// back to hard-coded window dimensions; the frame metrics differ per system.
+constexpr int MARGIN = 3;
 
-// UI layout - status label
-constexpr int LABEL_X = 2;
-constexpr int LABEL_Y = 4;
-constexpr int LABEL_WIDTH = 70;
-constexpr int LABEL_HEIGHT = 30;
-
-// UI layout - per-key toggle row (owner drawn, click a cell to toggle it)
+// Per-key toggle row (owner drawn, click a cell to toggle it)
 constexpr int KEY_COUNT = 4;
-constexpr int KEY_ROW_X = 2;
-constexpr int KEY_ROW_Y = 42;
-constexpr int KEY_CELL_W = 17;
-constexpr int KEY_CELL_H = 30;
+constexpr int KEY_CELL_W = 19;
+constexpr int KEY_CELL_H = 22;
+constexpr int KEY_ROW_W = KEY_COUNT * KEY_CELL_W;
+
+// Status label sits directly above the row and shares its width
+constexpr int LABEL_X = MARGIN;
+constexpr int LABEL_Y = 2;
+constexpr int LABEL_WIDTH = KEY_ROW_W;
+constexpr int LABEL_HEIGHT = 28;
+
+constexpr int KEY_ROW_X = MARGIN;
+constexpr int KEY_ROW_Y = LABEL_Y + LABEL_HEIGHT + 3;
+
+constexpr int CLIENT_WIDTH = KEY_ROW_W + MARGIN * 2;
+constexpr int CLIENT_HEIGHT = KEY_ROW_Y + KEY_CELL_H + MARGIN;
+
+// Window style, shared by CreateWindowExW and the AdjustWindowRectEx call
+constexpr DWORD WINDOW_STYLE = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+constexpr DWORD WINDOW_EX_STYLE = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
 
 // Font settings
 constexpr int FONT_SIZE = 22;
-constexpr int KEY_FONT_SIZE = 16;
+constexpr int KEY_FONT_SIZE = 15;
 
 // Number of Sleep(1) calls between key sends while held. NOT milliseconds.
 // timeBeginPeriod is never used, so one Sleep(1) costs a full timer tick
@@ -59,7 +70,7 @@ constexpr COLORREF KEY_OFF_TEXT_COLOR = RGB(120, 120, 120);
 struct KeyEntry {
     DWORD vk;                     // virtual key code
     const wchar_t* label;         // text drawn in the toggle row, also the .ini key name
-    bool needsConfirm;            // ask before turning on (R fires ultimates on cooldown)
+    bool isUltimate;              // drawn in the accent colour (fires on cooldown)
     volatile bool selected;       // user turned this key on
     volatile bool pressed;        // physically held right now
     volatile bool weBlockedDown;  // we swallowed the keydown, so we must swallow the keyup
@@ -186,7 +197,7 @@ void DrawKeyRow(HDC hdc) {
         COLORREF bg = KEY_OFF_BG_COLOR;
         COLORREF fg = KEY_OFF_TEXT_COLOR;
         if (g_keys[i].selected) {
-            bg = g_keys[i].needsConfirm ? KEY_WARN_BG_COLOR : KEY_ON_BG_COLOR;
+            bg = g_keys[i].isUltimate ? KEY_WARN_BG_COLOR : KEY_ON_BG_COLOR;
             fg = KEY_ON_TEXT_COLOR;
         }
 
@@ -270,13 +281,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     int windowX = monitorData.found ? monitorData.leftmostX : 0;
     int windowY = monitorData.found ? monitorData.leftmostY : 0;
 
+    // Grow the requested client area by the frame metrics so the client ends up
+    // exactly CLIENT_WIDTH x CLIENT_HEIGHT - no leftover margin on any edge.
+    RECT frame = { 0, 0, CLIENT_WIDTH, CLIENT_HEIGHT };
+    AdjustWindowRectEx(&frame, WINDOW_STYLE, FALSE, WINDOW_EX_STYLE);
+
     // Create window - positioned at leftmost monitor's top-left corner
     hMainWnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        WINDOW_EX_STYLE,
         CLASS_NAME,
         L"P2",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        windowX, windowY, WINDOW_WIDTH, WINDOW_HEIGHT,
+        WINDOW_STYLE,
+        windowX, windowY,
+        frame.right - frame.left, frame.bottom - frame.top,
         NULL, NULL, hInstance, NULL
     );
 
@@ -422,21 +439,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 if (idx < 0) break;
 
                 KeyEntry& key = g_keys[idx];
-                if (!key.selected && key.needsConfirm) {
-                    // MessageBox runs its own message loop, so the low-level
-                    // keyboard hook keeps being serviced while it is up.
-                    wchar_t prompt[320];
-                    wsprintfW(prompt,
-                        L"%s 키를 자동 반복 대상으로 켭니다.\n\n"
-                        L"궁극기처럼 쿨다운이 도는 순간 바로 발동하는 스킬은\n"
-                        L"의도하지 않은 타이밍에 나갈 수 있습니다.\n\n"
-                        L"계속할까요?", key.label);
-                    if (MessageBoxW(hwnd, prompt, L"P2",
-                                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
-                        return 0;
-                    }
-                }
-
                 key.selected = !key.selected;
                 if (!key.selected) {
                     key.pressed = false;

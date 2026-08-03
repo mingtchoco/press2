@@ -17,17 +17,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### 동작
 - **Q/W/E/R 중 선택한 키**를 누르고 있는 동안 worker 스레드가 그 키를 반복 전송 (원본 키는 hook에서 차단). 여러 키를 동시에 누르면 각각 **전부 같은 주기로** 나간다(분할 아님)
-- 기본 선택은 E 하나. R은 궁극기라 기본 꺼짐이며 켤 때 확인 대화상자를 띄운다
+- 기본 선택은 E 하나. R은 쿨다운이 도는 순간 궁극기가 나가버리므로 기본 꺼짐이고, 켜면 다른 키와 구분되는 강조색으로 표시된다
 - **실측 반복 주기 ~31ms = 약 32회/초** (2026-08-03에 `E_KEY_INTERVAL` 10→2로 상향) — "타이밍" 절의 수치를 먼저 읽을 것
 - F2: 활성화 / F3: 비활성화. 두 키는 **무조건·전역으로 소비**되어 다른 앱에 전달되지 않는다 ("전역 키 소비 범위" 참조)
 - LoL 포그라운드 진입 시 자동 ON, 이탈 시 자동 OFF. **F2/F3 수동 토글은 다음 포그라운드 전환까지만 유지된다** (아래 "함정" 참조)
-- 항상 위(topmost) 90x125 소형 창(클라이언트 84x96), 가장 왼쪽 모니터 좌상단, 작업표시줄 미표시. 창 아래쪽 `Q W E R` 칸을 클릭해 키를 켜고 끈다
+- 항상 위(topmost) 소형 창, 가장 왼쪽 모니터 좌상단, 작업표시줄 미표시. 창 아래쪽 `Q W E R` 칸을 클릭해 키를 켜고 끈다
 
 ### 키 선택과 설정 파일
 - 상태는 `g_keys[KEY_COUNT]`(autokey_e.cpp 상단 `KeyEntry` 배열) 하나에 모여 있다. 키를 추가하려면 이 배열에 항목을 넣고 `KEY_COUNT`를 늘리면 되며, hook·worker·그리기 모두 배열을 순회하므로 다른 곳은 손댈 필요가 없다. 단 창 폭(`KEY_CELL_W * KEY_COUNT`)이 클라이언트 84px를 넘지 않는지 확인할 것
 - 선택은 exe 옆 `autokey_e.ini`(`[Keys]` 섹션, `Q`/`W`/`E`/`R` = `0`/`1`)에 저장되고 시작 시 창 생성 전에 읽는다. `.gitignore`에 등록돼 있으니 커밋되지 않는다
-- 토글 클릭은 `WM_LBUTTONDOWN`에서 처리한다. R 확인용 `MessageBoxW`는 자체 메시지 루프를 돌리므로 대화상자가 떠 있는 동안에도 저수준 훅은 계속 서비스된다 — 훅 콜백 안이 아니라 `WindowProc` 안이라 허용되는 것이며, 훅 콜백에는 절대 모달 UI를 넣지 말 것
+- 토글 클릭은 `WM_LBUTTONDOWN`에서 처리한다. 확인 대화상자는 없다(2026-08-03 제거)
 - 토글 행은 STATIC 컨트롤이 아니라 `WM_PAINT`에서 직접 그린다(`DrawKeyRow`). 클릭 판정은 `HitTestKeyCell`의 좌표 계산이므로 레이아웃 상수를 바꾸면 두 함수가 함께 따라가야 한다
+
+### 레이아웃 — 창 크기는 콘텐츠에서 역산한다
+하드코딩된 창 크기 상수는 **없다**. `MARGIN` / `KEY_CELL_W` / `KEY_CELL_H` / `LABEL_HEIGHT`에서 `CLIENT_WIDTH` · `CLIENT_HEIGHT`를 계산하고, `WinMain`이 `AdjustWindowRectEx(WINDOW_STYLE, WINDOW_EX_STYLE)`로 프레임 두께를 더해 `CreateWindowExW`에 넘긴다. 그 결과 클라이언트 영역이 정확히 콘텐츠 크기(현재 82x58, 창 88x87)가 되고 여백이 남지 않는다.
+
+- 예전에는 `WINDOW_WIDTH/HEIGHT`를 직접 넘겨서 클라이언트가 84x96이 되고 우측 14px·하단 24px가 비어 있었다. **창 크기를 다시 하드코딩하지 말 것** — 프레임 두께는 시스템/테마마다 다르다.
+- 키를 늘리면 `CLIENT_WIDTH`가 자동으로 따라 넓어진다. 셀 크기나 개수만 조정하면 되고 창 크기는 손댈 필요가 없다.
+- 상태 라벨과 키 행은 폭을 공유한다(`LABEL_WIDTH = KEY_ROW_W`). 둘의 우측 끝이 어긋나면 이 관계가 깨진 것이다.
 
 ---
 
@@ -60,7 +67,7 @@ Bash 도구에서는 `export PATH="/c/msys64/mingw64/bin:$PATH"`.
 - `-lcomctl32`: 실제 호출이 없어 COMCTL32 import가 생기지 않는 사문화된 플래그다(autokey_e.cpp:4의 `#include <commctrl.h>`도 미사용). 무해하므로 제거하지 말 것 — exe가 git에 추적되므로 플래그 변경은 재빌드·재커밋까지 동반되는 검증되지 않은 변경이 된다.
 
 ### 매니페스트는 저장소에 없다
-`resource.rc`에는 매니페스트 리소스가 없고(전체 27줄이 `1 ICON` + `1 VERSIONINFO`뿐) `build.bat:36`에도 지정이 없다. exe에 박혀 있는 `requestedExecutionLevel level="asInvoker"` + supportedOS 매니페스트는 MinGW가 자동 링크하는 `C:\msys64\mingw64\lib\default-manifest.o`에서 온다 — 그래서 저장소를 grep해도 안 나온다. 이 기본 매니페스트에는 `dpiAware`가 없고 소스에도 `SetProcessDPIAware` 호출이 없어 앱은 **DPI 비인식**이다(`WINDOW_WIDTH/HEIGHT 90`:10-11, `FONT_SIZE 24`:20 등 모든 픽셀 상수가 100% 배율 기준이며 배율 디스플레이에서는 비트맵 확대되어 흐릿하다). UAC 수준이나 DPI 인식을 바꾸려면 `resource.rc`에 `1 24 "app.manifest"` 한 줄과 매니페스트 파일을 추가하면 되고, 기본 매니페스트를 충돌 없이 대체한다(실측 검증).
+`resource.rc`에는 매니페스트 리소스가 없고(전체 27줄이 `1 ICON` + `1 VERSIONINFO`뿐) `build.bat:36`에도 지정이 없다. exe에 박혀 있는 `requestedExecutionLevel level="asInvoker"` + supportedOS 매니페스트는 MinGW가 자동 링크하는 `C:\msys64\mingw64\lib\default-manifest.o`에서 온다 — 그래서 저장소를 grep해도 안 나온다. 이 기본 매니페스트에는 `dpiAware`가 없고 소스에도 `SetProcessDPIAware` 호출이 없어 앱은 **DPI 비인식**이다(`MARGIN` / `KEY_CELL_W` / `FONT_SIZE` 등 소스 상단의 레이아웃 상수가 전부 100% 배율 기준이며, 배율 디스플레이에서는 Windows가 창을 비트맵 확대해 흐릿해진다). UAC 수준이나 DPI 인식을 바꾸려면 `resource.rc`에 `1 24 "app.manifest"` 한 줄과 매니페스트 파일을 추가하면 되고, 기본 매니페스트를 충돌 없이 대체한다(실측 검증).
 
 ### 아이콘 재생성
 `icon.ico` / `icon.png`는 `create_icon.py`(Pillow)가 생성한다:
@@ -295,8 +302,9 @@ E 연타 중 스킬이 안 나가는 증상은 이 앱의 재발 가능한 핵�
 - 단일 `isEPressed` bool → `KeyEntry g_keys[]` 배열로 전환. hook·worker·그리기가 전부 배열을 순회하므로 키를 늘릴 때 손댈 곳은 배열과 `KEY_COUNT`뿐이다
 - 확장하면서 stuck key 비대칭을 `weBlockedDown`으로 함께 해소했다. 키가 1개에서 4개로 늘면 같은 함정도 4배가 되므로, 구조를 바꾸는 김에 고치는 것이 자연스러웠다
 - 동시 홀드 정책은 **분할이 아니라 병렬**로 정했다. Q와 E를 같이 누르면 각각 32회/초씩 나간다(합쳐서 32회/초로 나누지 않음). 게임 입력 파이프라인 부하는 선택한 키 수에 비례한다
-- R 확인 대화상자를 `WindowProc`에 두었다. 훅 콜백이 아니라 `WM_LBUTTONDOWN` 안이고 `MessageBoxW`가 자체 메시지 루프를 돌리므로 훅이 계속 서비스된다 — 같은 코드를 훅 콜백에 넣으면 안 된다
-- 검증 방법: `PostMessage(WM_LBUTTONDOWN)`으로 셀 좌표를 찍어 토글·ini 저장·재시작 유지·확인 대화상자 출현까지 자동 검증했다. 반대로 **키 처리 경로 자체는 자동 검증 불가**(`LLKHF_INJECTED` 때문에 합성 입력이 훅을 통과)
+- R 켤 때 확인 대화상자를 넣었다가 같은 날 사용자 요청으로 제거했다. 경고는 강조색 표시로만 남는다
+- 레이아웃은 창 크기를 하드코딩하지 않고 콘텐츠에서 역산하도록 바꿨다(위 "레이아웃" 절). 처음엔 `WINDOW_WIDTH/HEIGHT`를 직접 넘겨서 클라이언트 84x96에 콘텐츠가 79x55만 차지해 우측 14px·하단 24px가 비었다 — 프레임 두께를 눈대중으로 빼는 방식의 전형적 실패다
+- 검증 방법: `PostMessage(WM_LBUTTONDOWN)`으로 셀 좌표를 찍어 토글·ini 저장·재시작 유지를, `GetClientRect`로 실제 클라이언트 크기를 자동 검증했다. 반대로 **키 처리 경로 자체는 자동 검증 불가**(`LLKHF_INJECTED` 때문에 합성 입력이 훅을 통과)
 
 ### 2026-08-03 (성능 최적화)
 - **wake 불변식 발견이 이 프로젝트 성능 논의의 핵심**: `E_KEY_INTERVAL`은 worker의 wake 빈도를 바꾸지 않는다(전 구간 ~64.7회/초 고정). 이걸 몰랐기 때문에 2026-04-08에 "더 빠르게"를 `timeBeginPeriod`로 풀려다 렉이 났다. 상수만 낮췄으면 스케줄러 부하 증가 없이 같은 목적을 달성할 수 있었다
