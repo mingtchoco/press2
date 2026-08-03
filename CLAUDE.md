@@ -21,7 +21,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **실측 반복 주기 ~31ms = 약 32회/초** (2026-08-03에 `E_KEY_INTERVAL` 10→2로 상향) — "타이밍" 절의 수치를 먼저 읽을 것
 - F2: 활성화 / F3: 비활성화. 두 키는 **무조건·전역으로 소비**되어 다른 앱에 전달되지 않는다 ("전역 키 소비 범위" 참조)
 - LoL 포그라운드 진입 시 자동 ON, 이탈 시 자동 OFF. **F2/F3 수동 토글은 다음 포그라운드 전환까지만 유지된다** (아래 "함정" 참조)
-- 항상 위(topmost) 소형 창, 가장 왼쪽 모니터 좌상단, 작업표시줄 미표시. 창 아래쪽 `Q W E R` 칸을 클릭해 키를 켜고 끈다
+- 항상 위(topmost) 소형 창, 가장 왼쪽 모니터 좌상단, 작업표시줄 미표시. **제목표시줄이 없다** — 창 아래쪽 `Q W E R` 칸을 클릭해 키를 켜고 끄고, 그 밖의 영역을 좌클릭 드래그해 창을 옮기며, **우클릭으로 종료**한다
 
 ### 키 선택과 설정 파일
 - 상태는 `g_keys[KEY_COUNT]`(autokey_e.cpp 상단 `KeyEntry` 배열) 하나에 모여 있다. 키를 추가하려면 이 배열에 항목을 넣고 `KEY_COUNT`를 늘리면 되며, hook·worker·그리기 모두 배열을 순회하므로 다른 곳은 손댈 필요가 없다. 단 창 폭(`KEY_CELL_W * KEY_COUNT`)이 클라이언트 84px를 넘지 않는지 확인할 것
@@ -30,7 +30,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 토글 행은 STATIC 컨트롤이 아니라 `WM_PAINT`에서 직접 그린다(`DrawKeyRow`). 클릭 판정은 `HitTestKeyCell`의 좌표 계산이므로 레이아웃 상수를 바꾸면 두 함수가 함께 따라가야 한다
 
 ### 레이아웃 — 창 크기는 콘텐츠에서 역산한다
-하드코딩된 창 크기 상수는 **없다**. `MARGIN` / `KEY_CELL_W` / `KEY_CELL_H` / `LABEL_HEIGHT`에서 `CLIENT_WIDTH` · `CLIENT_HEIGHT`를 계산하고, `WinMain`이 `AdjustWindowRectEx(WINDOW_STYLE, WINDOW_EX_STYLE)`로 프레임 두께를 더해 `CreateWindowExW`에 넘긴다. 그 결과 클라이언트 영역이 정확히 콘텐츠 크기(현재 82x58, 창 88x87)가 되고 여백이 남지 않는다.
+하드코딩된 창 크기 상수는 **없다**. `MARGIN` / `ROW_GAP` / `KEY_CELL_W` / `KEY_CELL_H` / `LABEL_HEIGHT`에서 `CLIENT_WIDTH` · `CLIENT_HEIGHT`를 계산하고, `WinMain`이 `AdjustWindowRectEx(WINDOW_STYLE, WINDOW_EX_STYLE)`로 프레임 두께를 더해 `CreateWindowExW`에 넘긴다. 그 결과 클라이언트 영역이 정확히 콘텐츠 크기(실측 **76x50**, 창 **78x52**)가 되고 여백이 남지 않는다.
+
+`WINDOW_STYLE`은 `WS_POPUP | WS_BORDER`다 — **제목표시줄이 없다.** `WS_CAPTION`은 세로 29px를 먹었고 그건 전체 창 높이의 3분의 1이었다. 제목표시줄을 없앤 대가로 두 가지를 직접 구현했으므로 스타일을 바꿀 때 함께 봐야 한다:
+- **이동**: `WM_LBUTTONDOWN`이 키 셀 바깥이면 `ReleaseCapture()` 후 `SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)`로 기본 이동 루프에 넘긴다. 이 루프는 메시지를 계속 펌핑하므로 드래그 중에도 키보드 훅은 정상 동작한다.
+- **종료**: 닫기 버튼이 없으므로 `WM_RBUTTONDOWN`이 `WM_CLOSE`를 보낸다.
 
 - 예전에는 `WINDOW_WIDTH/HEIGHT`를 직접 넘겨서 클라이언트가 84x96이 되고 우측 14px·하단 24px가 비어 있었다. **창 크기를 다시 하드코딩하지 말 것** — 프레임 두께는 시스템/테마마다 다르다.
 - 키를 늘리면 `CLIENT_WIDTH`가 자동으로 따라 넓어진다. 셀 크기나 개수만 조정하면 되고 창 크기는 손댈 필요가 없다.
@@ -151,7 +155,7 @@ hook이 `return 1`을 반환하면 원본 키가 시스템으로 전달되지 �
 **단, 오탐 방향이 있다.** `wcsstr` 부분일치(autokey_e.cpp:410)는 프로세스를 전혀 확인하지 않으므로, 제목에 그 문자열이 들어간 아무 창(브라우저 탭·스트림 창 등)이 포그라운드가 되면 자동 ON된다. ON 상태에서는 그 앱에서 E down/up이 모두 차단되므로, "특정 앱에서만 E 입력이 이상하다"는 증상이 나오면 그 창의 제목부터 확인할 것.
 
 ### 창 배치
-`EnumDisplayMonitors`로 가장 왼쪽 모니터의 좌상단을 찾아 배치, 열거 실패 시 (0,0) 폴백(autokey_e.cpp:124-140). `WS_EX_TOPMOST | WS_EX_TOOLWINDOW`.
+`EnumDisplayMonitors`로 가장 왼쪽 모니터의 좌상단을 찾아 배치, 열거 실패 시 (0,0) 폴백(autokey_e.cpp:124-140). `WINDOW_EX_STYLE = WS_EX_TOPMOST | WS_EX_TOOLWINDOW`이라 작업표시줄과 alt-tab에 나오지 않는다 — 제목표시줄도 없으므로 창을 잃어버리면 되찾을 UI가 없다. 위치는 매번 계산되고 저장하지 않으므로 재실행하면 좌상단으로 돌아온다.
 
 ---
 
@@ -304,6 +308,7 @@ E 연타 중 스킬이 안 나가는 증상은 이 앱의 재발 가능한 핵�
 - 동시 홀드 정책은 **분할이 아니라 병렬**로 정했다. Q와 E를 같이 누르면 각각 32회/초씩 나간다(합쳐서 32회/초로 나누지 않음). 게임 입력 파이프라인 부하는 선택한 키 수에 비례한다
 - R 켤 때 확인 대화상자를 넣었다가 같은 날 사용자 요청으로 제거했다. 경고는 강조색 표시로만 남는다
 - 레이아웃은 창 크기를 하드코딩하지 않고 콘텐츠에서 역산하도록 바꿨다(위 "레이아웃" 절). 처음엔 `WINDOW_WIDTH/HEIGHT`를 직접 넘겨서 클라이언트 84x96에 콘텐츠가 79x55만 차지해 우측 14px·하단 24px가 비었다 — 프레임 두께를 눈대중으로 빼는 방식의 전형적 실패다
+- 클라이언트를 콘텐츠에 맞춘 뒤에도 창의 3분의 1이 제목표시줄이었다. 이런 소형 HUD에서는 **콘텐츠보다 크롬이 더 큰 낭비**이며, `WS_POPUP`으로 바꾸고 이동·종료를 직접 구현하는 편이 실익이 크다. 최종 90x125 → 78x52 (높이 40% 감소)
 - 검증 방법: `PostMessage(WM_LBUTTONDOWN)`으로 셀 좌표를 찍어 토글·ini 저장·재시작 유지를, `GetClientRect`로 실제 클라이언트 크기를 자동 검증했다. 반대로 **키 처리 경로 자체는 자동 검증 불가**(`LLKHF_INJECTED` 때문에 합성 입력이 훅을 통과)
 
 ### 2026-08-03 (성능 최적화)

@@ -10,33 +10,38 @@
 // is computed from CLIENT_WIDTH/HEIGHT via AdjustWindowRectEx in WinMain - so
 // the client area is exactly the content with no leftover margin. Do not go
 // back to hard-coded window dimensions; the frame metrics differ per system.
-constexpr int MARGIN = 3;
+constexpr int MARGIN = 2;
+constexpr int ROW_GAP = 2;
 
 // Per-key toggle row (owner drawn, click a cell to toggle it)
 constexpr int KEY_COUNT = 4;
-constexpr int KEY_CELL_W = 19;
-constexpr int KEY_CELL_H = 22;
+constexpr int KEY_CELL_W = 18;
+constexpr int KEY_CELL_H = 20;
 constexpr int KEY_ROW_W = KEY_COUNT * KEY_CELL_W;
 
 // Status label sits directly above the row and shares its width
 constexpr int LABEL_X = MARGIN;
-constexpr int LABEL_Y = 2;
+constexpr int LABEL_Y = MARGIN;
 constexpr int LABEL_WIDTH = KEY_ROW_W;
-constexpr int LABEL_HEIGHT = 28;
+constexpr int LABEL_HEIGHT = 24;
 
 constexpr int KEY_ROW_X = MARGIN;
-constexpr int KEY_ROW_Y = LABEL_Y + LABEL_HEIGHT + 3;
+constexpr int KEY_ROW_Y = LABEL_Y + LABEL_HEIGHT + ROW_GAP;
 
 constexpr int CLIENT_WIDTH = KEY_ROW_W + MARGIN * 2;
 constexpr int CLIENT_HEIGHT = KEY_ROW_Y + KEY_CELL_H + MARGIN;
 
-// Window style, shared by CreateWindowExW and the AdjustWindowRectEx call
-constexpr DWORD WINDOW_STYLE = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+// Window style, shared by CreateWindowExW and the AdjustWindowRectEx call.
+// No caption bar: it cost ~29px of height, half of the whole window. The window
+// stays draggable (left-drag anywhere outside the key cells) and closable
+// (right-click) - see WindowProc. WS_BORDER keeps a 1px outline so the widget
+// is still visible against a dark desktop.
+constexpr DWORD WINDOW_STYLE = WS_POPUP | WS_BORDER;
 constexpr DWORD WINDOW_EX_STYLE = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
 
 // Font settings
-constexpr int FONT_SIZE = 22;
-constexpr int KEY_FONT_SIZE = 15;
+constexpr int FONT_SIZE = 20;
+constexpr int KEY_FONT_SIZE = 14;
 
 // Number of Sleep(1) calls between key sends while held. NOT milliseconds.
 // timeBeginPeriod is never used, so one Sleep(1) costs a full timer tick
@@ -436,7 +441,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case WM_LBUTTONDOWN:
             {
                 int idx = HitTestKeyCell((short)LOWORD(lParam), (short)HIWORD(lParam));
-                if (idx < 0) break;
+                if (idx < 0) {
+                    // Outside the toggle cells: drag the window. There is no
+                    // caption bar to grab, so hand the click to the default
+                    // move loop as if it had landed on one.
+                    ReleaseCapture();
+                    SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                    return 0;
+                }
 
                 KeyEntry& key = g_keys[idx];
                 key.selected = !key.selected;
@@ -446,6 +458,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 SaveSettings();
                 UpdateUI();
             }
+            return 0;
+
+        case WM_RBUTTONDOWN:
+            // No caption bar means no close button; right-click exits instead.
+            PostMessage(hwnd, WM_CLOSE, 0, 0);
             return 0;
 
         case WM_DESTROY:
