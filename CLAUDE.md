@@ -12,31 +12,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 프로젝트 개요
 - **이름**: Press2 (AutoKey E) — 창 클래스명/타이틀은 모두 `P2`
 - **목적**: League of Legends E키 자동 반복 입력 유틸리티
-- **언어**: C++17 / Win32 API, 로직 전체가 단일 소스 파일 (`autokey_e.cpp`)
+- **언어**: C++17 / Win32 API, 로직 전체가 단일 소스 파일 (`autokey_e.cpp`, 441줄)
 - **출력**: `autokey_e.exe` (git에 추적됨 — "빌드 산출물 커밋" 참조)
 
 ### 동작
-- E키를 누르고 있는 동안 worker 스레드가 E를 반복 전송 (원본 E는 hook에서 차단)
-- F2: 활성화 / F3: 비활성화 (두 키 모두 시스템으로 전달되지 않고 소비됨)
-- LoL 포그라운드 진입 시 자동 ON, 이탈 시 자동 OFF
+- E키를 누르고 있는 동안 worker 스레드가 E를 반복 전송 (원본 E는 hook에서 차단). **실측 반복 주기 ~155ms = 약 6.5회/초** — "타이밍" 절의 수치를 먼저 읽을 것
+- F2: 활성화 / F3: 비활성화. 두 키는 **무조건·전역으로 소비**되어 다른 앱에 전달되지 않는다 ("전역 키 소비 범위" 참조)
+- LoL 포그라운드 진입 시 자동 ON, 이탈 시 자동 OFF. **F2/F3 수동 토글은 다음 포그라운드 전환까지만 유지된다** (아래 "함정" 참조)
 - 항상 위(topmost) 90x90 소형 창, 가장 왼쪽 모니터 좌상단, 작업표시줄 미표시
 
 ---
 
 ## 빌드
 
+### 툴체인 — PATH에 없다
+MinGW는 이 PC의 PATH에 등록되어 있지 않다(Machine/User PATH 모두 mingw/msys/gcc 항목 0건). 실체는 `C:\msys64\mingw64\bin`이며 `g++` 15.2.0 / `windres` / `strip` / `objdump`가 전부 여기 있다. PATH 설정 없이 `build.bat`을 돌리면 맨 앞 `where g++` 가드(build.bat:10-16)에 걸려 컴파일에 도달조차 못 하고 `[ERROR] g++ compiler not found!` 후 `pause`에서 멈춘다.
+
 ```batch
+set PATH=C:\msys64\mingw64\bin;%PATH%
 build.bat
 ```
+Bash 도구에서는 `export PATH="/c/msys64/mingw64/bin:$PATH"`.
 
-`build.bat`의 3단계 파이프라인:
+### 파이프라인
+`build.bat`의 3단계:
 1. `windres resource.rc -O coff -o resource.res` — 아이콘/버전정보 리소스 컴파일
 2. `g++ -Wall -Wextra -O3 -mwindows -static autokey_e.cpp resource.res -o autokey_e.exe -lcomctl32 -luser32 -lpsapi -std=c++17`
 3. `strip autokey_e.exe` (strip 미존재 시 경고만 내고 계속)
 
-주의: `build.bat`은 실패 시 `pause`로 입력을 대기하므로 비대화형 실행에서 멈출 수 있다. 컴파일 오류만 빠르게 확인하려면 2단계 g++ 명령을 직접 실행할 것.
+`build.bat`은 실패 시 `pause`로 입력을 대기하므로 비대화형 실행에서 멈춘다. 컴파일 오류만 빠르게 확인하려면 2단계 g++ 명령을 직접 실행할 것.
 
-**winmm은 링크하지 않는다** ("타이밍 제약" 참조).
+### 링크 플래그 vs 실제 import
+`objdump -p autokey_e.exe | grep "DLL Name"` → 현재 import는 **GDI32 / KERNEL32 / msvcrt / USER32 4개뿐**이며 winmm.dll은 없다(바이너리에 `timeBeginPeriod` 문자열도 0건). "타이밍 제약"의 winmm 미링크는 실측 확인된 사실이며, 이 명령이 회귀 감시 수단이다.
+
+- **주의**: `objdump`도 PATH에 없다. `/c/msys64/mingw64/bin/objdump.exe`를 직접 쓸 것. bare `objdump`는 `command not found`로 죽고 그러면 winmm grep도 exit 1이라 **"winmm 없음"과 신호가 구분되지 않는다**. `DLL Name` 4줄이 실제로 출력되는지 먼저 확인할 것.
+- `-lpsapi`: `GetModuleFileNameExW`는 Win7+에서 KERNEL32의 `K32GetModuleFileNameExW`로 포워딩되므로 import 목록에 PSAPI.DLL이 안 보인다. PSAPI가 없다고 LoL 감지가 빠진 게 아니다.
+- `-lcomctl32`: 실제 호출이 없어 COMCTL32 import가 생기지 않는 사문화된 플래그다(autokey_e.cpp:4의 `#include <commctrl.h>`도 미사용). 무해하므로 제거하지 말 것 — exe가 git에 추적되므로 플래그 변경은 재빌드·재커밋까지 동반되는 검증되지 않은 변경이 된다.
+
+### 매니페스트는 저장소에 없다
+`resource.rc`에는 매니페스트 리소스가 없고(전체 27줄이 `1 ICON` + `1 VERSIONINFO`뿐) `build.bat:36`에도 지정이 없다. exe에 박혀 있는 `requestedExecutionLevel level="asInvoker"` + supportedOS 매니페스트는 MinGW가 자동 링크하는 `C:\msys64\mingw64\lib\default-manifest.o`에서 온다 — 그래서 저장소를 grep해도 안 나온다. 이 기본 매니페스트에는 `dpiAware`가 없고 소스에도 `SetProcessDPIAware` 호출이 없어 앱은 **DPI 비인식**이다(`WINDOW_WIDTH/HEIGHT 90`:10-11, `FONT_SIZE 24`:20 등 모든 픽셀 상수가 100% 배율 기준이며 배율 디스플레이에서는 비트맵 확대되어 흐릿하다). UAC 수준이나 DPI 인식을 바꾸려면 `resource.rc`에 `1 24 "app.manifest"` 한 줄과 매니페스트 파일을 추가하면 되고, 기본 매니페스트를 충돌 없이 대체한다(실측 검증).
 
 ### 아이콘 재생성
 `icon.ico` / `icon.png`는 `create_icon.py`(Pillow)가 생성한다:
@@ -44,91 +58,209 @@ build.bat
 py create_icon.py
 build.bat
 ```
-`resource.rc:1`의 `1 ICON "icon.ico"`가 리소스 ID 1로 등록하고 `autokey_e.cpp:120`의 `LoadIcon(hInstance, MAKEINTRESOURCE(1))`이 이를 참조한다 — ID 변경 시 양쪽 모두 수정 필요.
+`resource.rc:1`의 `1 ICON "icon.ico"`가 리소스 ID 1로 등록하고 `autokey_e.cpp:120`의 `LoadIcon(hInstance, MAKEINTRESOURCE(1))`이 참조한다 — ID 변경 시 양쪽 모두 수정.
 
 ### 테스트
-자동화된 테스트 없음. 검증은 실행 후 수동 확인: F2/F3 토글, LoL 포커스 시 ON/OFF 자동 전환, E 홀드 시 반복 입력, 장시간 홀드 시 프리즈 없음.
+자동화된 테스트 없음이며, **원리상 자동화가 불가능하다**: hook 최상단의 `LLKHF_INJECTED` 통과(autokey_e.cpp:292-295)가 주입 출처를 구분하지 않으므로 `SendInput`/`keybd_event`로 보낸 F2/F3/E는 훅에 아무 영향을 주지 못한다. 자동 검증이 필요하면 판정 로직을 순수 함수로 분리해 단위 테스트하는 방향만 가능하다.
+
+수동 검증: F2/F3 토글, LoL 포커스 시 ON/OFF 자동 전환, E 홀드 시 반복 입력, **장시간 홀드 시 프리즈 없음**(짧게 누르면 과거 프리즈 버그가 재현되지 않으므로 반드시 길게), 실행 시 LoL이 이미 떠 있으면 F2 없이 ON으로 시작.
 
 ---
 
 ## 아키텍처 — 핵심 불변식
 
-로직 전체가 `autokey_e.cpp` 한 파일이지만, **4개의 실행 컨텍스트가 엄격히 분리**되어 있다. 이 분리가 이 프로젝트의 유일하고 핵심적인 설계이며, 경계를 넘으면 시스템 입력 파이프라인이 프리즈한다.
+`autokey_e.cpp`에는 4개의 **코드 컨텍스트**(hook 콜백 / worker 스레드 / WinEvent 콜백 / WindowProc)가 있지만 **실제 스레드는 2개뿐**이다. 이 구분이 이 프로젝트의 유일하고 핵심적인 설계다.
 
-1. **Hook 콜백** `LowLevelKeyboardProc` (autokey_e.cpp:285) — 전역 플래그(`isEnabled`, `isEPressed`) 조작만 수행. 키 전송(`keybd_event`/`SendInput`) 금지, UI 호출 금지. UI 갱신이 필요하면 `PostMessage(hMainWnd, WM_APP+1, 0, 0)`로 비동기 위임.
-2. **Worker 스레드** `WorkerThreadProc` (autokey_e.cpp:350) — 플래그를 폴링해 `SendEKey()` 호출. **유일한 키 전송 지점**.
-3. **WinEvent 콜백** `WinEventProc` (autokey_e.cpp:419) — 포그라운드 창 변경 감지 후 자동 ON/OFF. 여기서도 플래그 조작 + PostMessage만.
-4. **메시지 루프 / `WindowProc`** (autokey_e.cpp:224) — UI 갱신과 GDI 리소스(브러시/폰트) 소유·해제 담당.
+- hook 콜백(`autokey_e.cpp:166`, WH_KEYBOARD_LL)과 WinEvent 콜백(`autokey_e.cpp:169-177`, WINEVENT_OUTOFCONTEXT)은 둘 다 훅을 설치한 **WinMain 메인 스레드**로 배달되며, `autokey_e.cpp:194-197`의 메시지 루프가 계속 펌핑돼야 호출된다. 따라서 hook 콜백 · WinEventProc · WindowProc(autokey_e.cpp:224)은 같은 스레드에서 **직렬 실행**된다.
+- 진짜로 분리된 스레드는 worker(`autokey_e.cpp:181`, `WorkerThreadProc`:350) 하나뿐이고, **유일한 키 전송 지점**이다(`SendEKey`:339-345).
 
-**재진입 차단**: worker 스레드가 보낸 E는 hook 최상단(autokey_e.cpp:293)에서 `LLKHF_INJECTED` 플래그로 즉시 통과시킨다. 이 체크가 없으면 무한 재귀. (과거 `isSendingKey` 자체 플래그 방식은 `SendInput` 비동기 타이밍 때문에 실패 — 패턴 기록 참조.)
+여기서 나오는 두 가지 함정:
+1. 메인 스레드 쪽 셋 사이에는 경합이 없으므로 락/동기화를 추가하지 말 것(실제로 파일 전체에 크리티컬 섹션·뮤텍스가 0건). 반대로 셋 중 하나가 느려지면 나머지가 같이 밀린다 — 특히 `WinEventProc`는 `IsLeagueOfLegendsWindow` → `OpenProcess` + `GetModuleFileNameExW`(autokey_e.cpp:371,378)라는 무거운 호출을 하므로 그동안 키보드 훅 처리가 지연되고, `LowLevelHooksTimeout`(기본 ~300ms)을 넘기면 해당 키의 차단이 조용히 건너뛰어지거나 훅 자체가 해제될 수 있다.
+2. 진짜 경계는 "메인 스레드 ↔ worker 스레드"이며, `volatile bool` 플래그가 유일한 교차 스레드 통신 수단이다. 키 전송이 worker에만 있어야 하는 이유가 이 경계다 — 넘으면 hook chain 재진입으로 입력 파이프라인이 프리즈한다.
 
-**원본 키 차단**: hook이 `return 1`을 반환하면 원본 키가 시스템으로 전달되지 않는다 (F2/F3: autokey_e.cpp:302,307 / E down·up: autokey_e.cpp:316,323).
+### volatile 플래그 3종이 안전한 실제 이유
+`isEnabled` / `isEPressed` / `g_exitThread`(autokey_e.cpp:42-43,49)는 `volatile`일 뿐 C++ 표준의 스레드 동기화 수단이 아니다(MinGW g++ 빌드라 MSVC의 `/volatile:ms` 획득/해제 의미론도 없다). 그럼에도 깨지지 않는 이유는 **모든 쓰기가 메인 스레드에서만 일어나는 단일 writer 구조**이기 때문이다 — 쓰기 지점은 WinMain(180,186,200,201), hook 콜백(300,301,305,306,314,322), WinEventProc(430,436,437)뿐이고 셋 다 메인 스레드다. worker(350-365)는 351,352,355,357에서 읽기만 한다.
 
-### 타이밍 제약 (건드리지 말 것)
-- **`timeBeginPeriod` 사용 금지** — LoL 인게임 프레임 렉 유발 (에러 로그 2026-04-08). winmm 링크도 하지 않는다.
-- `E_KEY_INTERVAL = 10` (autokey_e.cpp:23)은 "10ms"가 아니라 **`Sleep(1)` 반복 횟수**다 (autokey_e.cpp:355-358). `timeBeginPeriod` 미적용 상태의 `Sleep(1)`은 실측 ~1-15.6ms이므로 실제 반복 주기는 상수값을 ms로 읽은 값보다 크다. 속도 조절은 이 상수만 조정하고, 시스템 타이머 해상도는 절대 변경하지 말 것.
-- idle 폴링은 `Sleep(2)` (autokey_e.cpp:361). 반복 대기 루프 내부에서도 매 tick마다 `isEPressed`/`isEnabled`를 재확인해 키를 뗀 즉시 멈춘다.
+지켜야 할 불변식:
+- worker 스레드에서 이 플래그들에 **쓰지 말 것**. 전송 후 정리 목적으로 `isEPressed = false`를 worker에 넣으면 단일 writer 전제가 깨진다.
+- 두 플래그를 원자적으로 함께 읽어야 하는 복합 불변식을 만들지 말 것. 현재 `autokey_e.cpp:352`의 `isEPressed && isEnabled`는 순간적으로 불일치 조합을 볼 수 있으나 최악이 E 1회 추가 전송이라 무해하다.
+- 둘 중 하나라도 어겨야 하면 임시방편 대신 `std::atomic<bool>`로 교체하는 것이 정답이다.
+
+### 재진입 차단
+worker가 보낸 E는 hook 최상단(autokey_e.cpp:292-295)의 `LLKHF_INJECTED` 체크로 즉시 통과시킨다. **이 체크를 빼면 생기는 문제는 무한 재귀가 아니라 기능 무력화다** — injected E down이 autokey_e.cpp:321-323에서 다시 `return 1`로 차단돼 게임에 닿지 않고, 뒤이은 injected E up이 autokey_e.cpp:313-314에서 `isEPressed`를 지워 반복이 매 tick 끊긴다. 재귀·프리즈는 hook 콜백 **안에서** `keybd_event`를 부르던 과거 구조의 증상이며, 현재는 키 전송이 worker에만 있어 재귀 경로 자체가 없다.
+
+이 체크는 주입 출처를 구분하지 않고 F2/F3·E 처리보다 위에 있으므로, **다른 프로그램이 주입한 키도 전부 무시된다**(AutoHotkey·화상 키보드·원격 데스크톱 등). 소스 주석 autokey_e.cpp:292의 "from our worker thread"는 실제 범위보다 좁게 읽히니 주의.
+
+### 원본 키 차단과 전역 소비 범위
+hook이 `return 1`을 반환하면 원본 키가 시스템으로 전달되지 않는다 (F2/F3: autokey_e.cpp:**303,308** / E up·down: autokey_e.cpp:316,323). 302·307은 `PostMessage(WM_APP+1)` 줄이므로 혼동하지 말 것.
+
+**F2/F3 분기(autokey_e.cpp:298-310)에는 isEnabled 게이트도 LoL 포그라운드 게이트도 없고**, 훅은 전역 설치(autokey_e.cpp:166, `dwThreadId=0`)다. 따라서 앱이 OFF이고 LoL이 아닌 창을 쓰고 있어도 프로세스가 떠 있는 동안 F2/F3는 어떤 앱에도 도달하지 않는다 — 탐색기 이름 바꾸기(F2), 브라우저·에디터 찾기(F3), Excel 셀 편집(F2)이 전부 무반응이 되고 해제 방법은 앱 종료뿐이다. E는 isEnabled 게이트는 있지만(down:321 / up:315-316) 포그라운드 게이트가 없어, F2로 수동 ON한 뒤에는 다음 포그라운드 변경이 자동 OFF시킬 때까지 비-LoL 앱에서도 E가 삼켜진다. 핫키를 바꾸거나 게이트를 추가할 때 이 범위를 먼저 확인할 것.
+
+### 시작 시 초기 상태 시드
+`SetWinEventHook`은 포그라운드 **변경** 이벤트만 구독하므로 이미 LoL이 떠 있는 상태로 실행하면 훅이 발화하지 않는다. 이 공백을 autokey_e.cpp:183-187의 시작 시 `GetForegroundWindow()` 1회 검사가 메운다. 이 검사를 지우면 "실행 후 alt-tab을 한 번 해야 켜지는" 회귀가 생기며, 포커스 전환 위주의 수동 검증으로는 잡히지 않는다.
+
+`UpdateUI()` 직접 호출 지점은 이 초기화 경로(autokey_e.cpp:189)와 `WM_APP+1` 핸들러(autokey_e.cpp:259) 둘뿐이므로, `isEnabled`를 바꾸는 코드를 새로 추가할 때는 `PostMessage(hMainWnd, WM_APP + 1, 0, 0)`을 반드시 함께 넣어야 UI가 따라간다.
+
+### 종료 순서 (훅 해제가 뒤에 있다)
+종료 경로는 메시지 루프 종료(autokey_e.cpp:194-197) → worker 조인(:203, 상한 1000ms) → 훅 해제(:209-217) 순이다. `WH_KEYBOARD_LL` 콜백은 설치 스레드의 메시지 펌프로 배달되므로 이 구간은 **훅이 걸려 있는데 아무도 서비스하지 않는** 상태다 — 키 입력마다 `LowLevelHooksTimeout`을 기다린 뒤에야 무시되며 그동안 시스템 전체 입력이 지연된다. 지금은 worker가 매 tick `g_exitThread`를 확인해 금방 빠져나가므로 체감되지 않을 뿐이다. 종료 경로에 대기·정리 작업을 추가하면 즉시 "끌 때 키보드가 멈춘다"로 나타나므로 새 정리 코드는 `UnhookWindowsHookEx` **뒤**에 넣거나 훅 해제를 조인 앞으로 옮길 것. (autokey_e.cpp:208의 `Cleanup resources in proper order` 주석은 이 점에서 신뢰하지 말 것.)
+
+**worker 수명 > GDI 수명**: `WM_DESTROY`가 브러시·폰트를 해제한 뒤(autokey_e.cpp:262-277)에야 `PostQuitMessage`(:279)가 루프를 끝내므로 worker는 GDI 객체 파괴 이후까지 살아 있다. 지금 안전한 이유는 `SendEKey`가 GDI/HWND를 전혀 만지지 않기 때문뿐이다. "worker는 UI/GDI를 만지지 않는다"는 취향이 아니라 수명 불변식이다.
+
+### 타이밍 (실측)
+- **`timeBeginPeriod` 사용 금지** — LoL 인게임 프레임 렉 유발(에러 로그 2026-04-08). winmm 링크도 하지 않는다.
+- `E_KEY_INTERVAL = 10`(autokey_e.cpp:23)은 ms가 아니라 **`Sleep(1)` 호출 횟수**다(autokey_e.cpp:355-358). 바로 위 autokey_e.cpp:22의 주석 `milliseconds between E key sends`는 **틀렸으니 신뢰하지 말 것**.
+- `timeBeginPeriod` 미적용 시 타이머 tick은 ~15.6ms이고, 이 루프처럼 `Sleep(1)`을 **연속 호출**하면 직전 반환이 tick 경계에 정렬되어 매 호출이 꼬박 1 tick을 소모한다(실측: 연속 12회 전부 14.8~16.2ms). 따라서 **반복 주기 ≈ E_KEY_INTERVAL × 15.5ms**.
+- 실측값(이 PC, timeBeginPeriod 미호출 프로세스, 각 8회 평균): N=1 → 14.0ms(71.5회/초), N=2 → 30.9ms, N=3 → 46.7ms, N=5 → 77.7ms, **N=10 → 154.6ms (6.47회/초)**, N=20 → 309.4ms. 완전한 선형.
+- **속도 상한**: `E_KEY_INTERVAL = 1`일 때 ~14-15.6ms(약 64-71회/초)가 이 구조의 물리적 한계다. 그 이상은 금지된 타이머 해상도 변경이 필요하므로 현 설계로는 불가능하다. 값 0은 대기 루프를 통째로 없애 `SendEKey()`가 무한 연타되므로 금지.
+- 다른 앱이 시스템 타이머를 1ms로 올려도 **소용없다**. Windows 10 2004+/11에서 타이머 해상도는 프로세스 단위이고 `autokey_e.exe`는 `timeBeginPeriod`를 호출하지 않는다(실측: 시스템 current=1.0ms 상태에서도 미호출 프로세스의 `Sleep(1)`은 avg 15.56ms).
+- idle 폴링은 `Sleep(2)`(autokey_e.cpp:361)로 적혀 있지만 **실제 주기는 1 tick ~15.6ms**다. 기본 해상도에서 `Sleep(1)`과 `Sleep(2)`는 실측 동일(15.56 vs 15.58ms)이므로 이 값 조정은 아무 효과가 없다. E를 누른 뒤 첫 E까지 0~16ms 지연이 있으며, 주석 autokey_e.cpp:360의 "2ms gives near-instant response"는 부정확하다.
+- 반복 대기 루프는 `Sleep(1)` **뒤에** 플래그를 재확인하므로(autokey_e.cpp:355-358) 키를 뗀 뒤 멈출 때까지 최대 1 tick(~16ms) 지연이 있다 — "즉시"가 아니다. 그래도 남은 주기 전체(~155ms)를 기다리는 것보다 약 10배 빠르므로 이 체크는 유지할 것.
 
 ### 단일 인스턴스
-`FindWindowW(L"P2", L"P2")` → `WM_CLOSE` → 최대 2초 대기 → `TerminateProcess` 폴백 (autokey_e.cpp:87-111). **창 클래스명과 타이틀이 둘 다 `"P2"`**여야 동작하므로, 어느 한쪽만 바꾸면 기존 인스턴스를 찾지 못해 중복 실행된다.
+`FindWindowW(L"P2", L"P2")` → `SendMessage(WM_CLOSE)` → `IsWindow` 폴링 2초 → `TerminateProcess` 폴백(autokey_e.cpp:87-111). **창 클래스명과 타이틀이 둘 다 `"P2"`**여야 동작하므로 어느 한쪽만 바꾸면 중복 실행된다.
+
+함정: 2초 상한은 폴링 루프(autokey_e.cpp:93-96)에만 적용되고 그 앞의 `SendMessage`(:90)에는 타임아웃이 없다. 기존 인스턴스의 메시지 펌프가 멈춰 있으면 새 인스턴스는 창을 만들기도 전에 무기한 블로킹되고 TerminateProcess 폴백에도 도달하지 못한다 — 이 경우 작업 관리자로 강제 종료해야 한다. (내성이 필요하면 `SendMessageTimeout(..., SMTO_ABORTIFHUNG, 2000, ...)`으로 교체.)
 
 ### LoL 감지
-프로세스명 우선 (PSAPI `GetModuleFileNameExW` → `League of Legends.exe` / `LeagueClient.exe`), 실패 시 창 제목 부분일치(`League of Legends (TM) Client`)로 폴백 (autokey_e.cpp:368-416). 프로세스 핸들 열기가 권한 문제로 실패하는 경우를 제목 폴백이 커버한다.
+프로세스명 우선(PSAPI `GetModuleFileNameExW` → `League of Legends.exe` / `LeagueClient.exe`), 실패 시 창 제목 부분일치(`League of Legends (TM) Client`)로 폴백(autokey_e.cpp:368-416). 제목 폴백은 프로세스 핸들 열기가 권한 문제로 실패하는 경우를 커버한다.
+
+**단, 오탐 방향이 있다.** `wcsstr` 부분일치(autokey_e.cpp:410)는 프로세스를 전혀 확인하지 않으므로, 제목에 그 문자열이 들어간 아무 창(브라우저 탭·스트림 창 등)이 포그라운드가 되면 자동 ON된다. ON 상태에서는 그 앱에서 E down/up이 모두 차단되므로, "특정 앱에서만 E 입력이 이상하다"는 증상이 나오면 그 창의 제목부터 확인할 것.
 
 ### 창 배치
-`EnumDisplayMonitors`로 가장 왼쪽 모니터의 좌상단 좌표를 찾아 배치하고, 열거 실패 시 (0,0) 폴백 (autokey_e.cpp:124-140). `WS_EX_TOPMOST | WS_EX_TOOLWINDOW`.
+`EnumDisplayMonitors`로 가장 왼쪽 모니터의 좌상단을 찾아 배치, 열거 실패 시 (0,0) 폴백(autokey_e.cpp:124-140). `WS_EX_TOPMOST | WS_EX_TOOLWINDOW`.
+
+---
+
+## 알려진 함정과 진단
+
+### F2/F3 수동 토글은 다음 포그라운드 전환까지만 유지된다
+`WinEventProc`(autokey_e.cpp:427-440)가 창이 바뀔 때마다 LoL 여부만 보고 `isEnabled`를 무조건 재설정하고, F2/F3(:300-301, :305-306)는 수동 오버라이드 플래그를 남기지 않는다. 따라서 LoL에서 F3로 꺼도 다른 창에 갔다 돌아오면 다시 ON이 되고, LoL이 아닌 앱에서 F2로 켜면 다음 전환에서 OFF로 돌아간다. "F3로 껐는데 다시 켜진다"는 버그가 아니라 설계 결과이며, 영구 수동 오버라이드가 필요하면 별도 플래그를 도입해야 한다.
+
+### E keyup 차단 조건의 비대칭 (stuck key)
+E keydown 차단은 "누른 시점의 `isEnabled`"(autokey_e.cpp:321), keyup 차단은 "뗀 시점의 `isEnabled`"(:313-318)로 각각 결정된다 — "그 down을 우리가 차단했는가"를 기억하는 상태가 없다. `isEnabled`는 E를 누르고 있는 도중에도 켜질 수 있으므로(F2: :300, LoL 포그라운드 진입: :429-431), OFF 상태에서 눌린 원본 E down은 이미 앱에 전달됐는데 뒤이은 up만 삼켜져 대상 앱이 E를 눌린 채로 인식할 수 있다. 보통은 이어지는 키 반복 keydown과 worker의 injected down/up 쌍이 상태를 풀어주지만, F2로 켠 경우는 F2가 키 반복 대상을 가져가 복구가 일어나지 않을 수 있다 [Medium]. 근본 수정은 "이 down을 차단했다"를 별도 플래그로 기억하는 것이다.
+
+### 실패는 무증상이다
+`RegisterClassW`(:122), `SetWindowsHookEx`(:166), `SetWinEventHook`(:169), `CreateThread`(:181) 모두 반환값을 검사하지 않고, 저장소 전체에 `MessageBox`·로그·`GetLastError` 호출이 0건이다. 창 생성 실패조차 조용히 `return 0`(:142-144). **UI의 ON/OFF는 훅이 살아 있다는 증거가 아니다** — 실행 시 LoL이 포그라운드면 키보드 훅이 죽어 있어도 ON으로 표시된다(:185-189).
+
+증상별 절단:
+- F2/F3 토글이 전혀 안 먹힘 → 키보드 훅 실패 (F2/F3 처리는 훅 안에만 존재)
+- F2 토글은 되는데 LoL 포커스 자동 전환만 안 됨 → WinEvent 훅 쪽(:419)
+- 창은 ON인데 E 반복만 안 먹음 → 권한(UIPI) 문제 우선 확인 (아래)
+
+원인을 좁히려면 해당 호출 지점에 임시로 반환값 검사 + `MessageBox`를 넣어 확인하고, 검증 후 반드시 제거할 것.
+
+### 권한(UIPI) 제약
+빌드 산출물에는 권한 상승 요청이 없다(`asInvoker`, uiAccess 없음 — "매니페스트는 저장소에 없다" 참조). 대상 창이 관리자 권한으로 실행 중이면 UIPI가 worker의 `keybd_event`(:343-344) 주입을 차단하므로 press2도 관리자 권한으로 띄워야 한다. 이때 **창은 ON인데 E 반복만 안 먹는** 증상이 나오는데, 권한 부족으로 `OpenProcess`(:371)가 실패해도 창 제목 폴백(:409-410)이 감지를 성공시키기 때문이다. "입력이 안 먹는다" 신고는 코드를 파기 전에 양쪽 프로세스의 권한 수준부터 확인할 것.
 
 ---
 
 ## git 워크플로
 
 ### Windows `nul` 파일 문제
-이 저장소에는 Windows 예약 장치명 `nul` 파일이 생성되어 git을 깨뜨리는 문제 전용 인프라가 있다:
-- `.git/hooks/pre-commit` — 커밋 전 `nul` 존재 확인 후 제거 시도 (샘플이 아닌 **활성 훅**)
-- `git-add-safe.bat` — 정리 후 `git add -A`, 실패 시 재정리·재시도하는 래퍼
-- `fix-nul.ps1` — 확장 경로(`\\?\`)로 삭제하는 PowerShell 폴백
-- `.gitignore`의 `nul` / `NUL` 항목
 
-`git add`가 원인 불명으로 실패하면 `git-add-safe.bat`을 쓰거나 `fix-nul.ps1`을 먼저 실행할 것. 일반 `del nul`은 파일이 아닌 장치명으로 해석되어 실패한다.
+**발생 원인**: Bash 도구(Git Bash)에서 cmd 스타일 `>nul` / `2>nul` 리다이렉션을 쓰면 `/dev/null`이 아니라 현재 디렉터리에 진짜 `nul` 파일이 생긴다(실측: `where cmd >nul 2>&1` → 29바이트 `nul` 생성). `build.bat:10,19,44`와 `git-add-safe.bat:23`에 이 패턴이 들어 있으므로 **그 줄을 bash로 복사해 실행하지 말 것** — .bat 안에서 cmd가 해석할 때만 장치명이라 안전하다. bash에서는 `>/dev/null 2>&1`.
+
+**실질 방어책은 `.gitignore:2-5`의 `nul` / `nul.*` / `NUL` / `NUL.*` 4줄이다.** 이 규칙이 살아 있는 한 stray `nul` 파일은 `git status` / `git add -A` / `git commit`을 깨뜨리지 않는다(실측: 규칙 없이 `git add -A` → `error: short read while indexing nul` … `fatal: adding files failed`, exit 128 / 규칙 있으면 exit 0 + 커밋 성공). **이 4줄을 지우지 말 것**이 핵심 지침이고, `git add` 실패를 nul 탓으로 단정하지 말 것.
+
+정리 인프라 3종은 이 규칙이 없던 시절의 유산이며 현재는 발동할 일이 없다:
+- `.git/hooks/pre-commit` — 활성 훅이지만 `.git/` 안이라 **커밋되지 않는다**(이 PC 로컬 전용, clone하면 없음). 정리는 저장소 밖 `C:\programming\2025\nul.bat`에 위임하며 실패해도 `exit 0`이라 커밋을 막지 않는다. 평상시엔 sh `[ -e "nul" ]`가 false라 즉시 no-op.
+- `fix-nul.ps1` — 확장 경로(`\\?\`)로 삭제하는 PowerShell 스크립트. **자동 경로에서는 호출되지 않는다**(`git-add-safe.bat:10-15,31-35`는 `nul.bat`이 있으면 그쪽만 `call`하고 fix-nul.ps1은 else 분기, pre-commit은 참조조차 안 함). 사람이 직접 `powershell -ExecutionPolicy Bypass -File fix-nul.ps1`로 돌릴 때만 의미가 있고, `Get-Location` 기준 재귀라 영향이 저장소 안에 머물며 권한 상승·레지스트리 쓰기가 없다 — **수동 정리는 이쪽을 쓸 것**.
+- `git-add-safe.bat` — **사용하지 말 것** (아래).
+
+### `git-add-safe.bat`을 쓰지 말 것
+1. `git-add-safe.bat:6`의 `if exist nul`은 **항상 참**이다 — cmd에서 `nul`은 모든 디렉터리에 존재하는 예약 장치명이라 실제 파일 유무와 무관하다(실측: 파일 부재 상태에서 TRUE, 대조군 `if exist zzz_nofile`은 FALSE). 매 실행마다 "NUL file detected!"를 출력하고 외부 `nul.bat`을 무조건 호출한다.
+2. `nul.bat`은 관리자 권한 자가상승(`runas`)을 시도한다. 비관리자 셸에서는 매번 UAC 프롬프트가 떠 비대화형 흐름이 멈춘다.
+3. 관리자 셸이면 `nul.bat` 마지막 줄이 `exit /B`가 아닌 bare `exit`라 **cmd 세션 전체가 종료**되어 정작 `git add -A`(:23,:39)에 도달하지 못한다. 종료 코드는 0이라 실패로 보이지 않는다 — 출력이 `NUL file detected!`에서 끊기고 `Cleanup completed.` / `Done!`이 안 나오면 add가 실행되지 않은 것이다.
+4. 동작하더라도 `git add -A`라서 의도적으로 미추적 상태인 파일(`autokey_e_simple.cpp`, `autokey_e_complex.cpp.backup`, 루트 `claude-code-ps.bat`)을 전부 스테이징한다 — 셋 다 `.gitignore` 규칙이 없다.
+
+**1차 정리 경로는 저장소 밖에 있다.** `C:\programming\2025\nul.bat`은 clone에 따라오지 않으며, 실행 시 press2를 크게 벗어난다: `cd /d "%~dp0"`로 작업 디렉터리를 `C:\programming\2025`로 바꾼 뒤 `for /d /r`로 **2025 트리 전체**를 재귀 스캔하고 `%TEMP%`/바탕화면/다운로드도 훑으며, `nul.*` 와일드카드에 자기 자신이 걸려 삭제될 수 있고, 삭제 실패 시 HKLM `PendingFileRenameOperations`에 재부팅 삭제를 예약한다.
+
+**존재 확인 주의**: 이 파일을 PowerShell `Test-Path`로 확인하지 말 것 — 예약 장치명 파싱 때문에 실제로 있어도 False를 돌려주며 `\\?\`를 붙여도 마찬가지다. `Get-ChildItem -Force -Filter 'nul*'`, `[System.IO.File]::Exists()`, cmd `if exist`, Git Bash `ls`를 쓸 것.
 
 ### 빌드 산출물 커밋
-`autokey_e.exe`와 `resource.res`는 **git에 추적된다** (`.gitignore`에 `*.res`가 있어도 이미 추적 중인 파일에는 무시 규칙이 적용되지 않음). 소스 수정 후에는 `build.bat`을 돌려 재빌드된 exe까지 커밋하는 것이 이 저장소의 관례다 (`git log --oneline -- autokey_e.exe` — 소스 변경 커밋과 별개로 `build:` 타입 exe 커밋이 누적되어 있다).
+`autokey_e.exe`와 `resource.res`는 **git에 추적되지만 이유가 서로 다르다**. `resource.res`는 `.gitignore:10`의 `*.res`에 매치되나 이미 인덱스에 있어 무시 규칙이 무력화된 상태다(`git check-ignore -v --no-index resource.res`로만 확인 가능 — 인덱스를 보는 기본 `git check-ignore`는 아무것도 보고하지 않는다). 반면 `autokey_e.exe`는 `.gitignore`에 `*.exe` 규칙 자체가 없다(:11은 `*.exe.manifest`). 즉 새로 생기는 임의의 `.exe`도 그대로 스테이징 대상이므로 실험 빌드 산출물을 남겨두지 말 것.
+
+소스 수정 후에는 `build.bat`을 돌려 재빌드된 exe까지 커밋하는 것이 이 저장소의 관례다(`git log --oneline -- autokey_e.exe` — 소스 변경 커밋과 별개로 `build:` 타입 exe 커밋이 누적).
+
+### `.claude/`도 추적 대상
+`.claude/claude-code-cmd.bat`, `.claude/claude-code-ps.bat`, `.claude/settings.local.json`이 git에 추적된다(`.gitignore`에 `.claude/` 규칙 없음). 통상 로컬 전용인 `settings.local.json`까지 추적되므로 Claude Code 권한/설정을 바꾸면 그대로 작업 트리 변경으로 잡힌다. 소스 변경 커밋 시에는 `git add`에 파일을 명시할 것.
+
+주의: `.claude/claude-code-ps.bat`과 루트 `claude-code-ps.bat`은 `::` 주석에 한글을 포함한 배치 파일이다(둘 다 `C:\Tools\cc.bat` 호출). cmd는 배치를 OEM 코드페이지로 파싱하므로 한글 배치는 토큰 깨짐 위험이 있다 — 이 파일들을 수정할 일이 생기면 ASCII로 바꿀 것.
 
 ---
 
-## 미추적 참고 파일
-`autokey_e_simple.cpp`, `autokey_e_complex.cpp.backup`은 git에 없는 과거 변종이며 `build.bat`이 빌드하지 않는다. simple 쪽은 worker 스레드 대신 `WM_TIMER`(50ms) 기반이고 PSAPI/LoL 감지가 없어 현재 설계와 다르므로, 참고 시 현행 코드와 혼동하지 말 것.
+## 미추적 참고 파일 (코드 복사 금지)
+
+`autokey_e_simple.cpp`, `autokey_e_complex.cpp.backup`은 git에 없고 `build.bat`도 빌드하지 않는 과거 변종이다. **둘 다 worker 스레드가 없고 `WM_TIMER`(50ms) 기반**이라 현행의 핵심 불변식을 따르지 않는다.
+
+- `autokey_e_simple.cpp` — LoL 감지·단일 인스턴스·모니터 배치가 모두 없는 최소 변종.
+- `autokey_e_complex.cpp.backup` — LoL 감지는 현행과 동일하게 갖고 있고(psapi:5, `LOL_PROCESS_1/2`:39-41, `SetWinEventHook`:147-155, `IsLeagueOfLegendsProcess/Window`:415-463), 현행에 **없는** 기능 2개가 더 있다: (1) 우선순위 키 인터럽트 — Q/W/R·1-7·Space·D/F/B/P/Tab 등이 눌린 동안 E 반복을 멈추고 떼면 재개(`PRIORITY_KEYS`:44-56, `priorityKeyCount`:322-346), (2) 랜덤 간격 휴먼라이저(:29-33, :75-78) — 단 `GetRandomInterval()`은 호출부가 없는 **데드코드**이고 실제 간격은 고정 50ms(:248,341,362). 단일 인스턴스·모니터 배치·`LLKHF_INJECTED`는 전부 없다.
+
+**여기서 코드를 복사해 오면 이미 해결된 프리즈/렉이 그대로 재발한다.** 두 변종은 이 문서가 실패로 규정한 구조를 그대로 담고 있다:
+- `LLKHF_INJECTED` 대신 `isSendingKey` 자체 플래그 (simple:41,231 / backup:72,306) — 타이밍 문제로 폐기된 방식
+- hook 콜백 안에서 `SendEKey()`·`KillTimer`·`UpdateUI` 직접 호출 (simple:218-219,239,250,252 / backup:292-293,330,341,360-362) — 재진입 프리즈 경로
+- `SendEKey()` 내부 동기 `Sleep()` (simple:277 / backup:388) — 2026-04-05 렉의 원인 구조
+
+기능 아이디어만 참고하고 구현은 반드시 현행 구조(hook은 플래그 조작만 → worker가 전송, UI는 PostMessage)로 다시 쓸 것.
+
+또한 두 변종도 현행과 같은 창 클래스명/타이틀 `P2`를 쓰지만(simple:53,68 / backup:97,112) 단일 인스턴스 종료 블록은 현행에만 있다. 변종을 띄워둔 채 `autokey_e.exe`를 실행하면 변종이 조용히 종료되고, 반대 순서로는 아무도 막지 않아 두 인스턴스가 각자의 훅으로 E를 이중 전송한다. 변종을 실험용으로 빌드한다면 클래스명·타이틀을 먼저 바꿀 것.
+
+---
+
+## 폐기된 접근 (재시도 금지)
+- **키 전송에 `SendInput` 사용** — hook callback 컨텍스트에서 입력이 무시됨. `keybd_event`로 복원 (af1c4be, 2026-04-05). 현재는 worker에서 보내므로 전제가 다르지만 되돌리려면 장시간 홀드 실측 검증 후에만.
+- **hook → `PostMessage`로 키 전송 위임** — E 입력 지연/누락 발생 (627579b, 2026-04-05). `PostMessage(WM_APP+1)`은 UI 갱신 요청 전용이며 키 전송 경로로 재사용하지 말 것.
+- **hook callback 내 `keybd_event` 직접 호출** — hook chain 동기 재진입으로 5~7회 만에 시스템 전체 프리즈 (438cdf0, 2026-04-06). 회귀 검증은 반드시 E를 길게 눌러서 할 것.
+- **`WM_TIMER` 기반 반복 전송** — worker 스레드 재설계 때 완전 폐기 (ee05c54, 2026-04-08). 현행 소스에 `SetTimer`/`WM_TIMER`가 0건이며 타이머 방식으로 되돌리지 말 것.
+- **`timeBeginPeriod(1)` + `-lwinmm`** — LoL 인게임 렉 (2668c37, 2026-04-08). 에러 로그 참조.
+
+### 제거된 선례 — Q/W/R 스킬 미발동
+E 연타 중 스킬이 안 나가는 증상은 이 앱의 재발 가능한 핵심 리스크다. 27c4407(2025-09-20)에 우선순위 키 시스템(`PRIORITY_KEYS` + 카운터)이 구현된 적 있으나 350d0de(2025-10-25)의 대규모 단순화 리라이트에서 랜덤 간격(`std::mt19937`)과 함께 사라졌고, 커밋 메시지에 제거 사실이 없어 의도적 폐기인지 불명이다. 같은 증상이 보고되면 `git show 27c4407`로 선례를 먼저 볼 것 — 단 당시 구현은 hook 안에서 `SetTimer`를 조작하는 방식이라 현행 worker 구조에 그대로 이식할 수 없고, 인터럽트 조건은 플래그로만 옮기고 판정·전송은 worker에 남겨야 한다.
 
 ---
 
 ## 에러 로그
 <!-- 형식: | 날짜 | 에러 | 원인 | 해결책 | -->
 
+### 2026-08-03 - CLAUDE.md 문서-코드 불일치 전수조사
+- **증상**: 문서의 여러 수치·줄 번호·권고가 실제 코드/환경과 어긋나 있었음 (7개 축 전수 감사, 43건 확정)
+- **주요 오류 [Certain]**: (1) 반복 주기 "~16ms"가 실측 ~155ms로 약 10배 틀림, (2) F2/F3 `return 1` 줄 번호 302·307 → 실제 303·308, (3) `LLKHF_INJECTED` 제거 시 "무한 재귀"가 아니라 기능 무력화, (4) "4개 실행 컨텍스트"가 4개 스레드로 오독됨(실제 2개), (5) `git-add-safe.bat` 사용 권고가 실제로는 해로움, (6) `.gitignore`에 `*.exe` 규칙이 없어 exe 추적 이유 설명이 틀림, (7) 학습 사항 2026-04-05가 7분 만에 철회된 접근을 "해결책"으로 기록
+- **해결**: 위 항목 전부 정정하고 실측 근거(objdump import 목록, ctypes Sleep 측정, git check-ignore --no-index, cmd 장치명 판정)를 문서에 명시. "폐기된 접근" / "알려진 함정과 진단" 섹션 신설
+- **교훈**: 문서의 수치는 근거 명령과 함께 적어야 한다. "~16ms"처럼 출처 없는 값은 검증되지 않은 채 다음 세션에 그대로 인용된다
+
 ### 2026-04-08 - timeBeginPeriod(1) 적용 후 LoL 인게임 렉 발생
 - **증상**: worker thread 구조는 유지한 채 `timeBeginPeriod(1)` + worker idle `Sleep(1)`로 속도 최적화했더니 LoL 인게임 프레임 렉 발생
 - **원인 [High]**: `timeBeginPeriod(1)`가 시스템 타이머 해상도를 1ms로 상승시켜 스케줄러 틱 빈도 급증. 거기에 worker thread가 초당 ~1000회 wake up하면서 게임 렌더 스레드의 프레임 페이싱을 교란. Windows 10 2004+의 per-process 스코프로도 게임 타이밍 민감도를 완전히 격리하지 못함
-- **해결**: `ee05c54` 시점의 `autokey_e.cpp` / `build.bat`으로 롤백. worker thread 구조와 10ms 반복 간격은 유지하되 `timeBeginPeriod`는 사용하지 않음 (실질 반복 간격 ~16ms로 조금 느려지지만 게임 렉 없음)
-- **교훈**: 게임과 같은 프로세스 스케줄링에 민감한 타겟에 대해서는 시스템 타이머 해상도 변경을 지양. 기본 Sleep 정밀도를 수용하는 것이 안전
+- **해결**: `ee05c54` 시점의 `autokey_e.cpp` / `build.bat`으로 롤백(현재 소스는 ee05c54와 diff 0). worker thread 구조와 `E_KEY_INTERVAL = 10`은 유지하되 `timeBeginPeriod`는 사용하지 않음
+- **대가 [정정 2026-08-03]**: 원문에 "실질 반복 간격 ~16ms"라고 적었으나 **틀렸다**. ~16ms는 `Sleep(1)` 1회 비용일 뿐이고 실제 E 반복 주기는 그 10배인 **~155ms(약 6.5회/초)**다. "조금 느려짐"이 아니라 게임 렉 제거와 연타 속도를 맞바꾼 트레이드오프다 (최적화 적용 시 실측 초당 64회 → 100회였음, 5792df6 커밋 본문)
+- **분리 검증 안 됨 [정정 2026-08-03]**: 롤백(2668c37)은 4가지를 한 번에 되돌렸다 — `timeBeginPeriod`/`timeEndPeriod`, `g_eScanCode` scan code 캐싱, idle poll `Sleep(1)`→`Sleep(2)`, `build.bat`의 `-lwinmm`. 따라서 "렉 원인 = timeBeginPeriod"는 [High] 추정이며 scan code 캐싱 단독의 무해성은 확인된 바 없다. 재시도한다면 한 번에 하나씩만 적용하고 LoL 인게임에서 실측할 것. (idle `Sleep(1)`→`Sleep(2)`는 timeBeginPeriod 제거 후에는 실효 없는 no-op이었다 — 실측 동일)
+- **교훈**: 게임처럼 스케줄링에 민감한 타겟에는 시스템 타이머 해상도 변경을 지양. 기본 Sleep 정밀도를 수용하는 것이 안전
 
 ## 패턴 기록
 <!-- 유용한 패턴, 해결책 기록 -->
 
-- Low-Level Keyboard Hook에서 자신이 보낸 키 차단 방지: `LLKHF_INJECTED` 플래그 체크 (isSendingKey 플래그는 SendInput과 타이밍 문제 발생)
-- 기존 인스턴스 종료: `FindWindowW` + `SendMessage(WM_CLOSE)` + 강제 종료 fallback
+- Low-Level Keyboard Hook에서 자신이 보낸 키 차단 방지: `LLKHF_INJECTED` 플래그 체크 (isSendingKey 플래그는 SendInput과 타이밍 문제 발생). 단 이 체크는 모든 주입 입력을 무시하므로 자동 테스트도 불가능해진다
+- 기존 인스턴스 종료: `FindWindowW` + `SendMessage(WM_CLOSE)` + 강제 종료 fallback (`SendMessage`에는 타임아웃이 없다는 한계 동반)
 - Hook 콜백은 플래그 조작만 수행: 키 전송은 worker thread로 위임 (hook callback 안에서 keybd_event 호출 시 hook chain 재진입 → 시스템 프리즈)
-- WM_TIMER 핸들러에서 SetTimer 재호출 불필요: 같은 ID의 타이머는 자동 반복
-- Windows `Sleep()` 기본 정밀도는 ~15.6ms. 게임 대상 유틸에서는 `timeBeginPeriod(1)` 사용 금지 (LoL 인게임 프레임 스케줄링 교란 확인됨, 2026-04-08 에러 로그 참조). 기본 정밀도 수용
-- 핫 패스에서 `MapVirtualKey` 반복 호출은 마이크로 최적화 수준 — 구조적 문제 아니면 건드리지 않음
+- Windows `Sleep()` 기본 정밀도는 ~15.6ms이며, **연속 호출 시 매 호출이 꼬박 1 tick을 소모**한다(`Sleep(1)`과 `Sleep(2)`가 실측 동일). 게임 대상 유틸에서는 `timeBeginPeriod(1)` 사용 금지 (2026-04-08 에러 로그)
+- 핫 패스에서 `MapVirtualKey` 반복 호출은 마이크로 최적화 수준 — 구조적 문제 아니면 건드리지 않음 (scan code 캐싱은 2668c37에서 다른 변경과 묶여 롤백됨)
+- cmd에서 `nul`은 항상 존재하는 예약 장치명이라 `if exist nul`은 무조건 참. 파일 존재 확인에 쓰지 말 것
+- `call`된 배치 파일의 bare `exit`는 호출자로 돌아가지 않고 cmd 세션 전체를 종료시킨다. 반드시 `exit /B`를 쓸 것
 
 ## 학습 사항
 <!-- 세션별 학습 내용 -->
 
 ### 2026-04-05
-- E키 부하/렉 원인: Hook 콜백에서 Sleep(1) + keybd_event 동기 호출이 메시지 큐 축적 유발
-- 해결: Sleep 제거, keybd_event->SendInput, Hook에서 PostMessage 비동기 처리로 전환
-- SendInput + isSendingKey 플래그 타이밍 문제: SendInput은 비동기적으로 hook 트리거하므로 플래그가 false가 된 후 hook이 호출됨. LLKHF_INJECTED 플래그로 해결
+- E키 부하/렉 원인: hook 콜백에서 `Sleep(1)` + `keybd_event` 동기 호출이 메시지 큐 축적 유발
+- 같은 날 밤 시도 → 철회 순서: SendInput 전환 + 키 전송의 PostMessage 위임(583d48f) → PostMessage 위임은 E 입력 지연/누락으로 철회(627579b) → SendInput은 hook 콜백 안에서 입력이 무시되어 keybd_event로 복원(af1c4be). **이 날 살아남은 결론은 두 가지뿐**: down/up 사이 Sleep 제거, `isSendingKey` 자체 플래그 대신 `LLKHF_INJECTED` 사용
+- 따라서 SendInput 재도입과 PostMessage를 통한 키 전송 위임은 둘 다 이미 실패한 경로다 ("폐기된 접근" 참조)
 
 ### 2026-04-08
 - 최종 안정 구조: hook callback은 `isEPressed` 플래그만 조작, worker thread가 플래그 폴링 + `keybd_event` 전송. Hook 재진입과 키 전송이 완전 분리되어 장시간 반복에도 프리즈 없음
-- 속도 최적화 시도 후 롤백: `timeBeginPeriod(1)` + idle `Sleep(1)` 조합이 LoL 인게임 렉 유발 → `ee05c54` 시점으로 롤백. Sleep 실측 정밀도 ~16ms 수용이 게임 호환성 면에서 최적
-- 교훈: "조금만 더 빠르게"라는 최적화는 게임 타이밍에 영향을 주지 않는 범위에서만 유효. 시스템 타이머 해상도 변경은 게임 대상 유틸에서 피해야 함
+- 속도 최적화 시도 후 롤백: `timeBeginPeriod(1)` 조합이 LoL 인게임 렉 유발 → `ee05c54` 시점으로 롤백
+- 교훈: "조금만 더 빠르게"라는 최적화는 게임 타이밍에 영향을 주지 않는 범위에서만 유효
+
+### 2026-08-03
+- 전수 감사로 확인: 현행 소스는 `ee05c54`와 완전히 동일(`git diff ee05c54 HEAD -- autokey_e.cpp build.bat` 결과 없음). 롤백이 온전했음
+- 이 저장소의 실제 위험은 코드보다 **문서와 주변 스크립트**에 있었다 — 소스 주석(`E_KEY_INTERVAL`의 "milliseconds", idle Sleep의 "near-instant", 정리 순서 주석)이 세 군데 모두 부정확했고, `git-add-safe.bat`은 권고할수록 해로운 도구였다
+- Windows 타이머 해상도는 Win10 2004+/11에서 프로세스 단위다. 다른 앱이 시스템 해상도를 1ms로 올려도 `timeBeginPeriod`를 호출하지 않은 프로세스의 `Sleep(1)`은 여전히 ~15.6ms (실측 검증)
