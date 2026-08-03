@@ -1,4 +1,6 @@
-# Press2 (AutoKey E) - 작업 규칙
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## 필수 규칙
 1. **에러 발생 시** 이 파일의 "에러 로그" 섹션에 기록 (원인, 해결책, 날짜)
@@ -8,35 +10,94 @@
 ---
 
 ## 프로젝트 개요
-- **이름**: Press2 (AutoKey E)
+- **이름**: Press2 (AutoKey E) — 창 클래스명/타이틀은 모두 `P2`
 - **목적**: League of Legends E키 자동 반복 입력 유틸리티
-- **언어**: C++ (Win32 API)
-- **빌드**: MinGW g++ (`build.bat`)
-- **출력**: `autokey_e.exe`
+- **언어**: C++17 / Win32 API, 로직 전체가 단일 소스 파일 (`autokey_e.cpp`)
+- **출력**: `autokey_e.exe` (git에 추적됨 — "빌드 산출물 커밋" 참조)
 
-## 주요 기능
-- E키 누르고 있으면 10ms 간격으로 자동 반복 입력
-- F2: 활성화 / F3: 비활성화
-- LoL 프로세스 자동 감지 (포커스 시 자동 ON/OFF)
-- 항상 위(topmost) 소형 창 (90x90), 왼쪽 모니터 상단 배치
+### 동작
+- E키를 누르고 있는 동안 worker 스레드가 E를 반복 전송 (원본 E는 hook에서 차단)
+- F2: 활성화 / F3: 비활성화 (두 키 모두 시스템으로 전달되지 않고 소비됨)
+- LoL 포그라운드 진입 시 자동 ON, 이탈 시 자동 OFF
+- 항상 위(topmost) 90x90 소형 창, 가장 왼쪽 모니터 좌상단, 작업표시줄 미표시
 
-## 기술 스택
-- Win32 API (WinMain, WindowProc, Low-Level Keyboard Hook)
-- WinEventHook (포그라운드 창 변경 감지)
-- PSAPI (프로세스 이름 확인)
-- MinGW g++ -O3 -mwindows -static
+---
 
-## 빌드 방법
+## 빌드
+
 ```batch
 build.bat
 ```
 
-## 파일 구조
-- `autokey_e.cpp` - 메인 소스 (단일 파일)
-- `resource.rc` - 리소스 정의 (아이콘, 버전 정보)
-- `icon.ico` / `icon.png` - 앱 아이콘
-- `build.bat` - 빌드 스크립트
-- `autokey_e.exe` - 빌드 산출물
+`build.bat`의 3단계 파이프라인:
+1. `windres resource.rc -O coff -o resource.res` — 아이콘/버전정보 리소스 컴파일
+2. `g++ -Wall -Wextra -O3 -mwindows -static autokey_e.cpp resource.res -o autokey_e.exe -lcomctl32 -luser32 -lpsapi -std=c++17`
+3. `strip autokey_e.exe` (strip 미존재 시 경고만 내고 계속)
+
+주의: `build.bat`은 실패 시 `pause`로 입력을 대기하므로 비대화형 실행에서 멈출 수 있다. 컴파일 오류만 빠르게 확인하려면 2단계 g++ 명령을 직접 실행할 것.
+
+**winmm은 링크하지 않는다** ("타이밍 제약" 참조).
+
+### 아이콘 재생성
+`icon.ico` / `icon.png`는 `create_icon.py`(Pillow)가 생성한다:
+```
+py create_icon.py
+build.bat
+```
+`resource.rc:1`의 `1 ICON "icon.ico"`가 리소스 ID 1로 등록하고 `autokey_e.cpp:120`의 `LoadIcon(hInstance, MAKEINTRESOURCE(1))`이 이를 참조한다 — ID 변경 시 양쪽 모두 수정 필요.
+
+### 테스트
+자동화된 테스트 없음. 검증은 실행 후 수동 확인: F2/F3 토글, LoL 포커스 시 ON/OFF 자동 전환, E 홀드 시 반복 입력, 장시간 홀드 시 프리즈 없음.
+
+---
+
+## 아키텍처 — 핵심 불변식
+
+로직 전체가 `autokey_e.cpp` 한 파일이지만, **4개의 실행 컨텍스트가 엄격히 분리**되어 있다. 이 분리가 이 프로젝트의 유일하고 핵심적인 설계이며, 경계를 넘으면 시스템 입력 파이프라인이 프리즈한다.
+
+1. **Hook 콜백** `LowLevelKeyboardProc` (autokey_e.cpp:285) — 전역 플래그(`isEnabled`, `isEPressed`) 조작만 수행. 키 전송(`keybd_event`/`SendInput`) 금지, UI 호출 금지. UI 갱신이 필요하면 `PostMessage(hMainWnd, WM_APP+1, 0, 0)`로 비동기 위임.
+2. **Worker 스레드** `WorkerThreadProc` (autokey_e.cpp:350) — 플래그를 폴링해 `SendEKey()` 호출. **유일한 키 전송 지점**.
+3. **WinEvent 콜백** `WinEventProc` (autokey_e.cpp:419) — 포그라운드 창 변경 감지 후 자동 ON/OFF. 여기서도 플래그 조작 + PostMessage만.
+4. **메시지 루프 / `WindowProc`** (autokey_e.cpp:224) — UI 갱신과 GDI 리소스(브러시/폰트) 소유·해제 담당.
+
+**재진입 차단**: worker 스레드가 보낸 E는 hook 최상단(autokey_e.cpp:293)에서 `LLKHF_INJECTED` 플래그로 즉시 통과시킨다. 이 체크가 없으면 무한 재귀. (과거 `isSendingKey` 자체 플래그 방식은 `SendInput` 비동기 타이밍 때문에 실패 — 패턴 기록 참조.)
+
+**원본 키 차단**: hook이 `return 1`을 반환하면 원본 키가 시스템으로 전달되지 않는다 (F2/F3: autokey_e.cpp:302,307 / E down·up: autokey_e.cpp:316,323).
+
+### 타이밍 제약 (건드리지 말 것)
+- **`timeBeginPeriod` 사용 금지** — LoL 인게임 프레임 렉 유발 (에러 로그 2026-04-08). winmm 링크도 하지 않는다.
+- `E_KEY_INTERVAL = 10` (autokey_e.cpp:23)은 "10ms"가 아니라 **`Sleep(1)` 반복 횟수**다 (autokey_e.cpp:355-358). `timeBeginPeriod` 미적용 상태의 `Sleep(1)`은 실측 ~1-15.6ms이므로 실제 반복 주기는 상수값을 ms로 읽은 값보다 크다. 속도 조절은 이 상수만 조정하고, 시스템 타이머 해상도는 절대 변경하지 말 것.
+- idle 폴링은 `Sleep(2)` (autokey_e.cpp:361). 반복 대기 루프 내부에서도 매 tick마다 `isEPressed`/`isEnabled`를 재확인해 키를 뗀 즉시 멈춘다.
+
+### 단일 인스턴스
+`FindWindowW(L"P2", L"P2")` → `WM_CLOSE` → 최대 2초 대기 → `TerminateProcess` 폴백 (autokey_e.cpp:87-111). **창 클래스명과 타이틀이 둘 다 `"P2"`**여야 동작하므로, 어느 한쪽만 바꾸면 기존 인스턴스를 찾지 못해 중복 실행된다.
+
+### LoL 감지
+프로세스명 우선 (PSAPI `GetModuleFileNameExW` → `League of Legends.exe` / `LeagueClient.exe`), 실패 시 창 제목 부분일치(`League of Legends (TM) Client`)로 폴백 (autokey_e.cpp:368-416). 프로세스 핸들 열기가 권한 문제로 실패하는 경우를 제목 폴백이 커버한다.
+
+### 창 배치
+`EnumDisplayMonitors`로 가장 왼쪽 모니터의 좌상단 좌표를 찾아 배치하고, 열거 실패 시 (0,0) 폴백 (autokey_e.cpp:124-140). `WS_EX_TOPMOST | WS_EX_TOOLWINDOW`.
+
+---
+
+## git 워크플로
+
+### Windows `nul` 파일 문제
+이 저장소에는 Windows 예약 장치명 `nul` 파일이 생성되어 git을 깨뜨리는 문제 전용 인프라가 있다:
+- `.git/hooks/pre-commit` — 커밋 전 `nul` 존재 확인 후 제거 시도 (샘플이 아닌 **활성 훅**)
+- `git-add-safe.bat` — 정리 후 `git add -A`, 실패 시 재정리·재시도하는 래퍼
+- `fix-nul.ps1` — 확장 경로(`\\?\`)로 삭제하는 PowerShell 폴백
+- `.gitignore`의 `nul` / `NUL` 항목
+
+`git add`가 원인 불명으로 실패하면 `git-add-safe.bat`을 쓰거나 `fix-nul.ps1`을 먼저 실행할 것. 일반 `del nul`은 파일이 아닌 장치명으로 해석되어 실패한다.
+
+### 빌드 산출물 커밋
+`autokey_e.exe`와 `resource.res`는 **git에 추적된다** (`.gitignore`에 `*.res`가 있어도 이미 추적 중인 파일에는 무시 규칙이 적용되지 않음). 소스 수정 후에는 `build.bat`을 돌려 재빌드된 exe까지 커밋하는 것이 이 저장소의 관례다 (`git log --oneline -- autokey_e.exe` — 소스 변경 커밋과 별개로 `build:` 타입 exe 커밋이 누적되어 있다).
+
+---
+
+## 미추적 참고 파일
+`autokey_e_simple.cpp`, `autokey_e_complex.cpp.backup`은 git에 없는 과거 변종이며 `build.bat`이 빌드하지 않는다. simple 쪽은 worker 스레드 대신 `WM_TIMER`(50ms) 기반이고 PSAPI/LoL 감지가 없어 현재 설계와 다르므로, 참고 시 현행 코드와 혼동하지 말 것.
 
 ---
 
