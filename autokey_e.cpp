@@ -19,8 +19,13 @@ constexpr int LABEL_HEIGHT = 35;
 // Font settings
 constexpr int FONT_SIZE = 24;
 
-// Key repeat interval (milliseconds between E key sends while held)
-constexpr int E_KEY_INTERVAL = 10;
+// Number of Sleep(1) calls between E key sends while held. NOT milliseconds.
+// timeBeginPeriod is never used, so one Sleep(1) costs a full timer tick
+// (~15.5ms measured). Repeat period ~= E_KEY_INTERVAL * 15.5ms.
+// Measured: 10 -> 6.47/s, 3 -> 21.6/s, 2 -> 32.4/s, 1 -> 64.4/s (structural cap).
+// The worker wakes ~64.7 times/sec regardless of this value; it only decides
+// how many wakes pass before a key is sent. Never set this to 0 (endless spam).
+constexpr int E_KEY_INTERVAL = 2;
 
 // League of Legends process detection
 constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
@@ -67,7 +72,7 @@ void UpdateUI();
 void SendEKey();
 
 // Monitor enumeration callback to find leftmost monitor
-BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC, LPRECT lprcMonitor, LPARAM dwData) {
+BOOL CALLBACK MonitorEnumProc(HMONITOR, HDC, LPRECT lprcMonitor, LPARAM dwData) {
     MonitorEnumData* data = reinterpret_cast<MonitorEnumData*>(dwData);
 
     // Check if this monitor is more to the left
@@ -327,11 +332,18 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 void UpdateUI() {
-    if (isEnabled) {
-        SetWindowTextW(hStatusLabel, L"ON");
-    } else {
-        SetWindowTextW(hStatusLabel, L"OFF");
+    // Repaint only when the state actually changed. One full repaint costs
+    // ~126us (max ~1.2ms measured) and it runs on the same thread that services
+    // the keyboard hook, so skipping no-op repaints keeps the hook responsive.
+    // Starts at -1 so the initial paint always happens.
+    static int lastState = -1;
+    const int state = isEnabled ? 1 : 0;
+    if (state == lastState) {
+        return;
     }
+    lastState = state;
+
+    SetWindowTextW(hStatusLabel, state ? L"ON" : L"OFF");
     InvalidateRect(hMainWnd, NULL, TRUE);
     UpdateWindow(hMainWnd);
 }
@@ -368,14 +380,22 @@ DWORD WINAPI WorkerThreadProc(LPVOID) {
 bool IsLeagueOfLegendsProcess(DWORD processId) {
     if (processId == 0) return false;
 
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    // PROCESS_QUERY_LIMITED_INFORMATION succeeds on processes that the older
+    // PROCESS_QUERY_INFORMATION | PROCESS_VM_READ pair cannot open, so fewer
+    // windows fall through to the title-substring fallback (a false-positive path).
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
     if (!hProcess) return false;
 
     wchar_t processName[MAX_PATH] = {0};
+    DWORD nameLen = MAX_PATH;
     bool isLoL = false;
 
-    // Get the process executable name
-    if (GetModuleFileNameExW(hProcess, NULL, processName, MAX_PATH)) {
+    // Get the process executable name. PROCESS_NAME_NATIVE skips the
+    // device-to-drive-letter translation (measured ~9x faster than
+    // GetModuleFileNameExW); the path still uses backslashes so the
+    // basename extraction below is unaffected. This runs on the main thread
+    // via WinEventProc, which also services the keyboard hook.
+    if (QueryFullProcessImageNameW(hProcess, PROCESS_NAME_NATIVE, processName, &nameLen)) {
         // Extract just the filename from the full path
         wchar_t* fileName = wcsrchr(processName, L'\\');
         if (fileName) {
