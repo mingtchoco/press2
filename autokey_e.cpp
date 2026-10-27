@@ -434,8 +434,9 @@ void DrawKeyGrid(HDC hdc) {
     if (prevFont) SelectObject(hdc, prevFont);
 }
 
-// Owner-drawn speed slider: track, filled portion up to the thumb, thumb bar,
-// and the current ms value right-aligned on top of the track.
+// Owner-drawn speed slider: track, green filled portion whose right edge is
+// the position indicator (no thumb bar), and the current ms value drawn last,
+// centered on the track in black so it stays readable over both colours.
 void DrawSlider(HDC hdc) {
     const RECT track = SliderRect();
     const int fillX = IntervalToSliderX(g_intervalMs);
@@ -661,7 +662,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         g_workerThread = NULL;
     }
 
-    // Cleanup resources in proper order
+    // Hooks are released AFTER the worker join above. Between the end of the
+    // message loop and this point the low-level hook is still installed but
+    // nobody pumps messages for it, so every keystroke waits for
+    // LowLevelHooksTimeout. Keep that window short: do not add cleanup work
+    // before this block (see CLAUDE.md, shutdown order).
     if (hKeyboardHook) {
         UnhookWindowsHookEx(hKeyboardHook);
         hKeyboardHook = NULL;
