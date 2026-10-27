@@ -14,17 +14,34 @@ constexpr int MARGIN = 2;
 constexpr int ROW_GAP = 2;
 
 // Per-key toggle grid (owner drawn, click a cell to toggle it).
-// KEY_COUNT keys fill the grid in array order, left to right then top to
-// bottom; the last grid slot is the chain-mode star button, not a key.
-constexpr int KEY_COUNT = 7;
+// The grid is a fixed KEY_COLS x KEY_ROWS slot array. Slots are NOT all keys
+// and the slot index is NOT the g_keys index any more: row 1 ends with the
+// chain-mode star and row 2 ends with the mouse-mode button. GRID_SLOTS below
+// is the single source of that mapping - the painter, the hit test and the
+// click handler all branch on it.
+constexpr int KEY_COUNT = 10;
 constexpr int KEY_COLS = 4;
-constexpr int KEY_ROWS = 2;
+constexpr int KEY_ROWS = 3;
 constexpr int KEY_CELL_W = 18;
 constexpr int KEY_CELL_H = 20;
-constexpr int GRID_CELL_COUNT = KEY_COLS * KEY_ROWS;   // 8 slots: 7 keys + star
-constexpr int STAR_CELL = GRID_CELL_COUNT - 1;         // index of the star button
+constexpr int GRID_CELL_COUNT = KEY_COLS * KEY_ROWS;   // 12 slots: 10 keys + star + mouse
 constexpr int KEY_ROW_W = KEY_COLS * KEY_CELL_W;
 constexpr int KEY_GRID_H = KEY_ROWS * KEY_CELL_H;
+
+// What a grid slot does. keyIndex is the g_keys index for Key slots and -1
+// otherwise.
+struct GridSlot {
+    enum Kind { Key, Star, Mouse };
+    Kind kind;
+    int keyIndex;
+};
+
+// Layout:  Q W E R  /  1 2 3 *  /  4 5 6 M
+constexpr GridSlot GRID_SLOTS[GRID_CELL_COUNT] = {
+    { GridSlot::Key, 0 }, { GridSlot::Key, 1 }, { GridSlot::Key, 2 }, { GridSlot::Key, 3 },
+    { GridSlot::Key, 4 }, { GridSlot::Key, 5 }, { GridSlot::Key, 6 }, { GridSlot::Star, -1 },
+    { GridSlot::Key, 7 }, { GridSlot::Key, 8 }, { GridSlot::Key, 9 }, { GridSlot::Mouse, -1 },
+};
 
 // Status label sits directly above the grid and shares its width
 constexpr int LABEL_X = MARGIN;
@@ -37,9 +54,9 @@ constexpr int KEY_ROW_Y = LABEL_Y + LABEL_HEIGHT + ROW_GAP;
 
 // Speed slider row, owner drawn in WM_PAINT. A real SCROLLBAR control is not
 // usable here: at KEY_ROW_W (72px) its two arrow buttons eat almost the whole
-// track, leaving a few pixels to express 31..200ms. So the row is a plain
+// track, leaving a few pixels to express 35..200ms. So the row is a plain
 // track plus a filled portion, driven by SetCapture dragging (coarse) and the
-// mouse wheel (1ms per notch).
+// mouse wheel (one INTERVAL_STEP_MS step per notch).
 constexpr int SLIDER_ROW_Y = KEY_ROW_Y + KEY_GRID_H + ROW_GAP;
 constexpr int SLIDER_X = MARGIN;
 constexpr int SLIDER_W = KEY_ROW_W;
@@ -55,12 +72,36 @@ constexpr int SLIDER_H = SLIDER_FONT_SIZE + 4;
 constexpr int CLIENT_WIDTH = KEY_ROW_W + MARGIN * 2;
 constexpr int CLIENT_HEIGHT = SLIDER_ROW_Y + SLIDER_H + MARGIN;
 
-// The grid is laid out as "all the keys, then the star in the last slot", so
-// the star index and the key count must stay in lock step.
-static_assert(KEY_COUNT == STAR_CELL, "last grid slot is the star button");
-// UpdateUI packs isEnabled into bit 0 and the per-key selection into bits
-// 1..KEY_COUNT, with chain mode just above them, in one unsigned.
-static_assert(KEY_COUNT < 31, "UpdateUI guard bits");
+// Every key must own exactly one grid slot, and every Key slot must point at a
+// valid, distinct g_keys index. Counted at compile time so adding a key without
+// giving it a slot (or giving two slots the same key) fails the build instead of
+// producing a cell that silently toggles the wrong thing.
+constexpr int CountSlotKind(GridSlot::Kind kind) {
+    int n = 0;
+    for (int i = 0; i < GRID_CELL_COUNT; i++) {
+        if (GRID_SLOTS[i].kind == kind) n++;
+    }
+    return n;
+}
+constexpr bool EveryKeyHasOneSlot() {
+    for (int k = 0; k < KEY_COUNT; k++) {
+        int seen = 0;
+        for (int i = 0; i < GRID_CELL_COUNT; i++) {
+            if (GRID_SLOTS[i].kind == GridSlot::Key && GRID_SLOTS[i].keyIndex == k) seen++;
+        }
+        if (seen != 1) return false;
+    }
+    return true;
+}
+static_assert(CountSlotKind(GridSlot::Key) == KEY_COUNT,
+              "grid Key slot count must equal KEY_COUNT");
+static_assert(EveryKeyHasOneSlot(), "each key needs exactly one grid slot");
+static_assert(CountSlotKind(GridSlot::Star) == 1, "exactly one chain-mode star slot");
+static_assert(CountSlotKind(GridSlot::Mouse) == 1, "exactly one mouse-mode slot");
+// UpdateUI packs isEnabled into bit 0, the per-key selection into bits
+// 1..KEY_COUNT, chain mode into bit KEY_COUNT+1 and the 2-bit mouse mode into
+// bits KEY_COUNT+2..KEY_COUNT+3, all in one unsigned.
+static_assert(KEY_COUNT < 29, "UpdateUI guard bits");
 
 // Settings are written to the ini on a debounce timer so that a burst of
 // wheel notches does not do one file write per notch on the thread that also
@@ -91,15 +132,26 @@ constexpr int KEY_FONT_SIZE = 14;
 // many wakes pass before a key is sent.
 //
 // The user-facing value is the repeat period in milliseconds (g_intervalMs,
-// driven by the slider). MIN_INTERVAL_MS is 2 ticks, the old E_KEY_INTERVAL = 2
-// setting (~32 sends/sec); 1 tick would be the structural cap (~64/sec) but the
-// minimum is deliberately 2 ticks. 0 ticks is never allowed (endless spam).
+// driven by the slider). It is quantised to INTERVAL_STEP_MS, so the value set
+// is 35, 40, ... 200 - evenly spaced, no special case at either end.
+// MIN_INTERVAL_MS is ~2.26 ticks: MIN_TICKS (2) stays the hard floor and the
+// dithering in IntervalToTicks spreads 35ms over 2 and 3 ticks. 1 tick would be
+// the structural cap (~64 sends/sec). 0 ticks is never allowed (endless spam).
 constexpr double TICK_MS = 15.5;
 constexpr int MIN_TICKS = 2;
-constexpr int MIN_INTERVAL_MS = 31;    // 2 ticks
+constexpr int MIN_INTERVAL_MS = 35;
 constexpr int MAX_INTERVAL_MS = 200;
-constexpr int DEFAULT_INTERVAL_MS = 115;   // midpoint of the slider range
+constexpr int INTERVAL_STEP_MS = 5;        // slider/wheel granularity
+constexpr int DEFAULT_INTERVAL_MS = 100;   // on the step grid, mid-range
 constexpr int JITTER_MS = 6;               // +/- randomisation per send cycle
+
+// Mouse click repeat mode, cycled by the M grid cell: off -> right -> left.
+// Stored as an int (not two bools) so the cell is a single 3-state control and
+// the ini holds one value.
+constexpr int MOUSE_MODE_OFF = 0;
+constexpr int MOUSE_MODE_RIGHT = 1;
+constexpr int MOUSE_MODE_LEFT = 2;
+constexpr int MOUSE_MODE_COUNT = 3;
 
 // League of Legends process detection
 constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
@@ -115,6 +167,8 @@ constexpr COLORREF KEY_ON_BG_COLOR = RGB(34, 139, 34);      // Selected key
 constexpr COLORREF KEY_WARN_BG_COLOR = RGB(198, 88, 28);    // Selected ultimate (R)
 constexpr COLORREF KEY_OFF_BG_COLOR = RGB(214, 214, 214);   // Unselected key
 constexpr COLORREF STAR_ON_BG_COLOR = RGB(218, 165, 32);    // Chain mode on (gold)
+constexpr COLORREF MOUSE_RIGHT_BG_COLOR = RGB(200, 40, 40);  // M cell: right click
+constexpr COLORREF MOUSE_LEFT_BG_COLOR = RGB(40, 90, 200);   // M cell: left click
 constexpr COLORREF KEY_ON_TEXT_COLOR = RGB(255, 255, 255);
 constexpr COLORREF KEY_OFF_TEXT_COLOR = RGB(120, 120, 120);
 constexpr COLORREF SLIDER_TEXT_COLOR = RGB(0, 0, 0);        // ms readout
@@ -134,7 +188,7 @@ struct KeyEntry {
 };
 
 // E defaults on to preserve the original behaviour. R and the number row
-// default off on purpose. '1'/'2'/'3' are the main keyboard row, not the numpad.
+// default off on purpose. '1'..'6' are the main keyboard row, not the numpad.
 KeyEntry g_keys[KEY_COUNT] = {
     { 'Q', L"Q", false, false, false, false },
     { 'W', L"W", false, false, false, false },
@@ -143,12 +197,16 @@ KeyEntry g_keys[KEY_COUNT] = {
     { '1', L"1", false, false, false, false },
     { '2', L"2", false, false, false, false },
     { '3', L"3", false, false, false, false },
+    { '4', L"4", false, false, false, false },
+    { '5', L"5", false, false, false, false },
+    { '6', L"6", false, false, false, false },
 };
 
 // Global variables
 HWND hMainWnd = NULL;
 HWND hStatusLabel = NULL;
 HHOOK hKeyboardHook = NULL;
+HHOOK hMouseHook = NULL;             // WH_MOUSE_LL, same thread as the keyboard hook
 HWINEVENTHOOK hWinEventHook = NULL;  // For League of Legends detection
 HFONT hFontStatus = NULL;  // Track font resource
 HFONT hFontKey = NULL;     // Font for the toggle grid
@@ -160,12 +218,33 @@ HBRUSH hBrushKeyOn = NULL;      // cached cell brushes, see DrawKeyGrid
 HBRUSH hBrushKeyWarn = NULL;
 HBRUSH hBrushKeyOff = NULL;
 HBRUSH hBrushStarOn = NULL;
+HBRUSH hBrushMouseRight = NULL; // M cell while cycled to right click
+HBRUSH hBrushMouseLeft = NULL;  // M cell while cycled to left click
 wchar_t g_iniPath[MAX_PATH] = {0};  // settings file, next to the exe
 
 // Repeat period in ms and chain mode. Both are written ONLY from the main
 // thread (WindowProc / WinMain); the worker thread only reads them.
 volatile int g_intervalMs = DEFAULT_INTERVAL_MS;
 volatile bool g_chainMode = false;
+
+// Mouse click repeat state. Same single-writer rule as the key flags: written
+// only from the main thread (WindowProc toggle / LowLevelMouseProc /
+// WinEventProc via ClearPressedKeys), read by the worker.
+// g_mouseBlockedDown holds WHICH button's down we swallowed (MOUSE_MODE_*),
+// not just "some button": it is the mouse twin of KeyEntry::weBlockedDown, and
+// the button has to match or a left click taken while the right button is held
+// would get its up swallowed and leave that button stuck down in the target app.
+volatile int g_mouseMode = MOUSE_MODE_OFF;
+volatile bool g_mousePressed = false;
+volatile int g_mouseBlockedDown = MOUSE_MODE_OFF;
+
+// Is League of Legends the foreground window? Seeded in WinMain and refreshed
+// by WinEventProc on every foreground change (both main thread). Unlike the
+// keyboard path, mouse blocking is gated on this: a globally swallowed LEFT
+// click would stop the user from even switching windows to escape. The
+// deliberate consequence is that turning the app on with F2 outside LoL repeats
+// the KEYS but not the mouse.
+volatile bool g_lolForeground = false;
 
 // Slider drag state and the pending-save flag. Touched only inside WindowProc
 // (main thread), never by the worker thread, so neither needs volatile.
@@ -186,6 +265,7 @@ struct MonitorEnumData {
 // Function declarations
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
 VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD);
 BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMonitor, LPARAM dwData);
 DWORD WINAPI WorkerThreadProc(LPVOID lpParam);
@@ -193,8 +273,14 @@ bool IsLeagueOfLegendsWindow(HWND hwnd);
 bool IsLeagueOfLegendsProcess(DWORD processId);
 void UpdateUI();
 void SendKey(DWORD vk);
+void SendMouseClick(int mode);
 void ClearPressedKeys();
 bool AnyKeyActive();
+bool MouseActive();
+bool PointInOwnWindow(POINT pt, const RECT& r);
+bool ShouldBlockMouseDown(int mouseMode, bool rightButton, bool enabled,
+                          bool lolForeground, bool overOwnWindow);
+bool ShouldSwallowInjectedClick(int mouseMode, bool enabled, bool overOwnWindow);
 void InitIniPath();
 void LoadSettings();
 void SaveSettings();
@@ -204,6 +290,7 @@ RECT GridCellRect(int idx);
 RECT SliderRect();
 int  HitTestKeyCell(int x, int y);
 bool PtInSlider(int x, int y);
+int  SnapInterval(int ms);
 int  SliderXToInterval(int x);
 int  IntervalToSliderX(int intervalMs);
 void SetIntervalFromX(int x);
@@ -218,6 +305,9 @@ void ClearPressedKeys() {
     for (int i = 0; i < KEY_COUNT; i++) {
         g_keys[i].pressed = false;
     }
+    // Same reasoning for the mouse button: drop the physical hold, keep
+    // g_mouseBlockedDown so the swallowed button-down still gets its up.
+    g_mousePressed = false;
 }
 
 bool AnyKeyActive() {
@@ -225,6 +315,45 @@ bool AnyKeyActive() {
         if (g_keys[i].selected && g_keys[i].pressed) return true;
     }
     return false;
+}
+
+// The mouse twin of AnyKeyActive: the M cell is on and its button is held.
+bool MouseActive() {
+    return g_mouseMode != MOUSE_MODE_OFF && g_mousePressed;
+}
+
+// Pure: is pt inside the rect (right/bottom exclusive, same convention as the
+// grid hit test)? Kept free of globals so it can be unit tested outside the app.
+bool PointInOwnWindow(POINT pt, const RECT& r) {
+    return (pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom);
+}
+
+// Pure: does the low-level mouse hook swallow this PHYSICAL button-down?
+// The "over our own window" exception is mandatory: the mouse hook fires before
+// the window is activated, so without it a right-click on P2 while LoL is the
+// foreground window (mode = right) would be eaten and the app could never be
+// closed - and in left mode no grid cell could be clicked either.
+// lolForeground is the second mandatory gate - see g_lolForeground.
+bool ShouldBlockMouseDown(int mouseMode, bool rightButton, bool enabled,
+                          bool lolForeground, bool overOwnWindow) {
+    if (!enabled) return false;
+    if (!lolForeground) return false;
+    if (mouseMode == MOUSE_MODE_OFF) return false;
+    if (overOwnWindow) return false;
+    return rightButton ? (mouseMode == MOUSE_MODE_RIGHT) : (mouseMode == MOUSE_MODE_LEFT);
+}
+
+// Pure: does the hook swallow an INJECTED button message?
+// Normally injected input passes straight through (same scope as the keyboard
+// hook). The one exception is our own worker's click landing on P2 itself: the
+// cursor can be parked over the window, and a right click there would close the
+// app on the next cycle while a left click would toggle a cell - and rewrite the
+// ini - once per cycle. Deliberately NOT gated on lolForeground, because the
+// worker only looks at isEnabled when it decides to fire.
+// The gate stays as narrow as possible (our modes, enabled, over our rect) so
+// other programs' injected clicks keep passing through everywhere else.
+bool ShouldSwallowInjectedClick(int mouseMode, bool enabled, bool overOwnWindow) {
+    return enabled && mouseMode != MOUSE_MODE_OFF && overOwnWindow;
 }
 
 // Settings live in autokey_e.ini next to the exe.
@@ -251,15 +380,20 @@ void LoadSettings() {
         g_keys[i].selected = (v != 0);
     }
 
-    // Interval is clamped on load: a hand-edited or stale ini must never put
-    // the worker below MIN_TICKS or above the slider range.
+    // Interval is clamped AND snapped on load: a hand-edited or stale ini must
+    // never put the worker outside the slider range or off the step grid.
     UINT ms = GetPrivateProfileIntW(L"Options", L"IntervalMs",
                                     DEFAULT_INTERVAL_MS, g_iniPath);
-    if (ms < (UINT)MIN_INTERVAL_MS) ms = (UINT)MIN_INTERVAL_MS;
     if (ms > (UINT)MAX_INTERVAL_MS) ms = (UINT)MAX_INTERVAL_MS;
-    g_intervalMs = (int)ms;
+    g_intervalMs = SnapInterval((int)ms);
 
     g_chainMode = (GetPrivateProfileIntW(L"Options", L"Chain", 0, g_iniPath) != 0);
+
+    // Mouse mode is clamped the same way: a hand-edited value must never put
+    // the M cell into a state the painter and the worker do not know.
+    UINT mm = GetPrivateProfileIntW(L"Options", L"Mouse", MOUSE_MODE_OFF, g_iniPath);
+    if (mm >= (UINT)MOUSE_MODE_COUNT) mm = MOUSE_MODE_OFF;
+    g_mouseMode = (int)mm;
 }
 
 // Appends "key=value" plus its terminating NUL to a section buffer.
@@ -294,6 +428,9 @@ void SaveSettings() {
     size_t olen = 0;
     AppendIniEntry(options, 128, olen, L"IntervalMs", msBuf);
     AppendIniEntry(options, 128, olen, L"Chain", g_chainMode ? L"1" : L"0");
+    wchar_t mouseBuf[16];
+    wsprintfW(mouseBuf, L"%d", g_mouseMode);
+    AppendIniEntry(options, 128, olen, L"Mouse", mouseBuf);
     options[olen] = L'\0';
     WritePrivateProfileSectionW(L"Options", options, g_iniPath);
 }
@@ -341,17 +478,33 @@ bool PtInSlider(int x, int y) {
     return (x >= r.left && x < r.right && y >= r.top && y < r.bottom);
 }
 
+// Pure: quantise a period to the INTERVAL_STEP_MS grid, then clamp it to the
+// slider range. Both bounds are multiples of the step, so the reachable set is
+// exactly 35, 40, ... 200 with no end special case. Kept free of globals so it
+// can be unit tested outside the app.
+int SnapInterval(int ms) {
+    if (ms < 0) ms = 0;
+    int snapped = ((ms + INTERVAL_STEP_MS / 2) / INTERVAL_STEP_MS) * INTERVAL_STEP_MS;
+    if (snapped < MIN_INTERVAL_MS) snapped = MIN_INTERVAL_MS;
+    if (snapped > MAX_INTERVAL_MS) snapped = MAX_INTERVAL_MS;
+    return snapped;
+}
+
 // Pixel <-> ms mapping. SLIDER_W - 1 is the number of pixel steps, and both
 // conversions round to nearest so the leftmost pixel is exactly
 // MIN_INTERVAL_MS and the rightmost pixel is exactly MAX_INTERVAL_MS
-// (a truncating map would stop one short of the maximum).
+// (a truncating map would stop one short of the maximum). The linear map is
+// unchanged; SnapInterval only quantises its output, and because both ends of
+// the range are on the step grid the two end pixels still land exactly on
+// MIN/MAX. Several adjacent pixels therefore share one value (~2.3ms per pixel
+// against a 5ms step) - that is the point of the step.
 int SliderXToInterval(int x) {
     const int span = SLIDER_W - 1;
     const int range = MAX_INTERVAL_MS - MIN_INTERVAL_MS;
     int rel = x - SLIDER_X;
     if (rel < 0) rel = 0;
     if (rel > span) rel = span;
-    return MIN_INTERVAL_MS + (rel * range + span / 2) / span;
+    return SnapInterval(MIN_INTERVAL_MS + (rel * range + span / 2) / span);
 }
 
 int IntervalToSliderX(int intervalMs) {
@@ -378,9 +531,9 @@ void SetIntervalFromX(int x) {
 }
 
 void NudgeInterval(HWND hwnd, int delta) {
-    int v = g_intervalMs + delta;
-    if (v < MIN_INTERVAL_MS) v = MIN_INTERVAL_MS;
-    if (v > MAX_INTERVAL_MS) v = MAX_INTERVAL_MS;
+    // One wheel notch moves one step on the grid; the snap then also absorbs a
+    // value left off-grid by an older ini.
+    const int v = SnapInterval(g_intervalMs + delta * INTERVAL_STEP_MS);
     if (v != g_intervalMs) {
         g_intervalMs = v;
         UpdateUI();
@@ -388,8 +541,8 @@ void NudgeInterval(HWND hwnd, int delta) {
     }
 }
 
-// Returns the grid slot at (x, y) in client coords, or -1.
-// 0..KEY_COUNT-1 are keys; STAR_CELL is the chain-mode button.
+// Returns the grid SLOT index at (x, y) in client coords, or -1. What the slot
+// means is in GRID_SLOTS[idx] - it is not a g_keys index.
 int HitTestKeyCell(int x, int y) {
     for (int i = 0; i < GRID_CELL_COUNT; i++) {
         RECT r = GridCellRect(i);
@@ -411,24 +564,44 @@ void DrawKeyGrid(HDC hdc) {
         cell.right -= 1;
         cell.bottom -= 1;
 
-        const bool isStar = (i == STAR_CELL);
-        const bool on = isStar ? (g_chainMode != false) : g_keys[i].selected;
-
+        // Everything the cell shows comes from its slot kind - no slot index
+        // arithmetic, so a layout change only touches GRID_SLOTS.
         HBRUSH brush = hBrushKeyOff;
         COLORREF fg = KEY_OFF_TEXT_COLOR;
-        if (on) {
-            if (isStar) {
+        const wchar_t* text = L"";
+
+        if (GRID_SLOTS[i].kind == GridSlot::Star) {
+            text = L"★";
+            if (g_chainMode) {
                 brush = hBrushStarOn;
-            } else {
-                brush = g_keys[i].isUltimate ? hBrushKeyWarn : hBrushKeyOn;
+                fg = KEY_ON_TEXT_COLOR;
             }
-            fg = KEY_ON_TEXT_COLOR;
+        } else if (GRID_SLOTS[i].kind == GridSlot::Mouse) {
+            // The letter itself reports the mode: M off, R right, L left.
+            const int mode = g_mouseMode;
+            if (mode == MOUSE_MODE_RIGHT) {
+                text = L"R";
+                brush = hBrushMouseRight;
+                fg = KEY_ON_TEXT_COLOR;
+            } else if (mode == MOUSE_MODE_LEFT) {
+                text = L"L";
+                brush = hBrushMouseLeft;
+                fg = KEY_ON_TEXT_COLOR;
+            } else {
+                text = L"M";
+            }
+        } else {
+            const KeyEntry& key = g_keys[GRID_SLOTS[i].keyIndex];
+            text = key.label;
+            if (key.selected) {
+                brush = key.isUltimate ? hBrushKeyWarn : hBrushKeyOn;
+                fg = KEY_ON_TEXT_COLOR;
+            }
         }
 
         if (brush) FillRect(hdc, &cell, brush);
         SetTextColor(hdc, fg);
-        DrawTextW(hdc, isStar ? L"★" : g_keys[i].label, -1, &cell,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, text, -1, &cell, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
     if (prevFont) SelectObject(hdc, prevFont);
@@ -481,10 +654,10 @@ void DrawSlider(HDC hdc) {
 //      period matches the setting even though a tick is a coarse ~15.5ms
 //   3. never fewer than MIN_TICKS ticks
 // At the two ends of the range the clamp in step 1 is one-sided, so the mean
-// is pulled inwards: a setting of 31 averages ~32.5ms and 200 averages
+// is pulled inwards: a setting of 35 averages ~36.5ms and 200 averages
 // ~198.5ms (measured over 100k draws). That is intentional - the alternative
 // is letting the jitter push the period below the floor the user asked for.
-// In the middle of the range the mean matches the setting (115 -> 114.98ms).
+// In the middle of the range the mean matches the setting (100 -> ~100ms).
 // Kept free of globals so it can be unit tested outside the app.
 int IntervalToTicks(int intervalMs, double rndJitter, double rndDither) {
     double target = (double)intervalMs + (rndJitter * 2.0 - 1.0) * (double)JITTER_MS;
@@ -622,6 +795,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Install low-level keyboard hook
     hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
 
+    // Install low-level mouse hook (same thread, same flag-only contract)
+    hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, hInstance, 0);
+
     // Install window event hook for League of Legends detection
     hWinEventHook = SetWinEventHook(
         EVENT_SYSTEM_FOREGROUND,    // eventMin
@@ -639,7 +815,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // Check initial foreground window
     HWND foregroundWindow = GetForegroundWindow();
-    if (IsLeagueOfLegendsWindow(foregroundWindow)) {
+    const bool lolAtStart = IsLeagueOfLegendsWindow(foregroundWindow);
+    g_lolForeground = lolAtStart;   // seed the mouse hook's foreground gate
+    if (lolAtStart) {
         isEnabled = true;
     }
 
@@ -653,28 +831,38 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         DispatchMessage(&msg);
     }
 
-    // Signal worker thread to exit and wait for it
+    // Signal worker thread to exit
     g_exitThread = true;
     ClearPressedKeys();
-    if (g_workerThread) {
-        WaitForSingleObject(g_workerThread, 1000);
-        CloseHandle(g_workerThread);
-        g_workerThread = NULL;
-    }
 
-    // Hooks are released AFTER the worker join above. Between the end of the
-    // message loop and this point the low-level hook is still installed but
-    // nobody pumps messages for it, so every keystroke waits for
-    // LowLevelHooksTimeout. Keep that window short: do not add cleanup work
-    // before this block (see CLAUDE.md, shutdown order).
+    // Hooks come off FIRST, before the worker join. A low-level hook callback is
+    // delivered to the thread that installed it, so from the moment the message
+    // loop ends until the hook is released nobody services it and every
+    // keystroke/click costs a full LowLevelHooksTimeout (~300ms) system wide.
+    // Releasing here makes that window as short as it can be: the join below can
+    // take up to 1000ms. Both LL callbacks only touch flags, so unhooking them
+    // while the worker is still finishing its last cycle is safe - the worker
+    // reads flags and sends input, it never needs the hooks.
     if (hKeyboardHook) {
         UnhookWindowsHookEx(hKeyboardHook);
         hKeyboardHook = NULL;
     }
 
+    if (hMouseHook) {
+        UnhookWindowsHookEx(hMouseHook);
+        hMouseHook = NULL;
+    }
+
     if (hWinEventHook) {
         UnhookWinEvent(hWinEventHook);
         hWinEventHook = NULL;
+    }
+
+    // Now wait for the worker to notice g_exitThread and finish.
+    if (g_workerThread) {
+        WaitForSingleObject(g_workerThread, 1000);
+        CloseHandle(g_workerThread);
+        g_workerThread = NULL;
     }
 
     // GDI resources (font, brushes) are cleaned up in WM_DESTROY
@@ -694,6 +882,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             hBrushKeyWarn = CreateSolidBrush(KEY_WARN_BG_COLOR);
             hBrushKeyOff = CreateSolidBrush(KEY_OFF_BG_COLOR);
             hBrushStarOn = CreateSolidBrush(STAR_ON_BG_COLOR);
+            hBrushMouseRight = CreateSolidBrush(MOUSE_RIGHT_BG_COLOR);
+            hBrushMouseLeft = CreateSolidBrush(MOUSE_LEFT_BG_COLOR);
             break;
 
         case WM_CTLCOLORSTATIC:
@@ -738,8 +928,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         case WM_MOUSEWHEEL:
             {
-                // Fine adjustment: the 72px track is ~2.4ms per pixel, so the
-                // wheel is the only way to land on an exact value.
+                // Step adjustment: the 72px track is ~2.3ms per pixel, so the
+                // wheel is the only way to walk the step grid one value at a
+                // time (a drag can skip a step between two pixels).
                 const int delta = (int)(short)HIWORD(wParam);
                 if (delta == 0) return 0;
                 int step = delta / WHEEL_DELTA;
@@ -807,11 +998,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     return 0;
                 }
 
-                if (idx == STAR_CELL) {
+                if (GRID_SLOTS[idx].kind == GridSlot::Star) {
                     // Chain mode: one held key fires every selected key.
                     g_chainMode = !g_chainMode;
+                } else if (GRID_SLOTS[idx].kind == GridSlot::Mouse) {
+                    // Three-state cycle: off -> right -> left -> off.
+                    int mode = g_mouseMode + 1;
+                    if (mode >= MOUSE_MODE_COUNT) mode = MOUSE_MODE_OFF;
+                    g_mouseMode = mode;
+                    // The held flag belongs to the mode that is going away.
+                    g_mousePressed = false;
                 } else {
-                    KeyEntry& key = g_keys[idx];
+                    KeyEntry& key = g_keys[GRID_SLOTS[idx].keyIndex];
                     key.selected = !key.selected;
                     if (!key.selected) {
                         key.pressed = false;
@@ -849,6 +1047,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             if (hBrushKeyWarn) { DeleteObject(hBrushKeyWarn); hBrushKeyWarn = NULL; }
             if (hBrushKeyOff) { DeleteObject(hBrushKeyOff); hBrushKeyOff = NULL; }
             if (hBrushStarOn) { DeleteObject(hBrushStarOn); hBrushStarOn = NULL; }
+            if (hBrushMouseRight) { DeleteObject(hBrushMouseRight); hBrushMouseRight = NULL; }
+            if (hBrushMouseLeft) { DeleteObject(hBrushMouseLeft); hBrushMouseLeft = NULL; }
 
             // Clean up fonts
             if (hFontStatus) {
@@ -929,6 +1129,70 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 }
 
+// Mouse twin of LowLevelKeyboardProc, delivered to the SAME thread, so the same
+// rules apply: flags only, no sending, no UI, no Sleep, no file I/O.
+// This callback is on an even hotter path than the keyboard one - WM_MOUSEMOVE
+// arrives hundreds of times a second - so the very first thing it does is bail
+// out on anything that is not one of the four button messages.
+LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (wParam != WM_LBUTTONDOWN && wParam != WM_LBUTTONUP &&
+        wParam != WM_RBUTTONDOWN && wParam != WM_RBUTTONUP) {
+        return CallNextHookEx(hMouseHook, nCode, wParam, lParam);
+    }
+
+    if (nCode >= 0) {
+        MSLLHOOKSTRUCT* pMouse = (MSLLHOOKSTRUCT*)lParam;
+        const bool injected = (pMouse->flags & LLMHF_INJECTED) != 0;
+
+        // "Is the cursor over P2?" is needed by both the injected and the
+        // physical path, but only ever matters while a mode is armed - so the
+        // GetWindowRect call is skipped entirely when the app is off or the M
+        // cell is off. GetWindowRect is cheaper than WindowFromPoint and enough
+        // here: the window is a borderless rectangle.
+        bool overOwn = false;
+        if (isEnabled && g_mouseMode != MOUSE_MODE_OFF) {
+            RECT own;
+            if (hMainWnd && GetWindowRect(hMainWnd, &own)) {
+                overOwn = PointInOwnWindow(pMouse->pt, own);
+            }
+        }
+
+        if (injected) {
+            // Injected input normally passes through (our own repeat clicks and,
+            // like the keyboard hook, anyone else's). The sole exception is a
+            // click of ours landing on P2 itself - see ShouldSwallowInjectedClick.
+            if (ShouldSwallowInjectedClick(g_mouseMode, isEnabled, overOwn)) {
+                return 1;
+            }
+            return CallNextHookEx(hMouseHook, nCode, wParam, lParam);
+        }
+
+        const bool isRight = (wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP);
+        const bool isDown = (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN);
+        const int button = isRight ? MOUSE_MODE_RIGHT : MOUSE_MODE_LEFT;
+
+        if (isDown) {
+            if (ShouldBlockMouseDown(g_mouseMode, isRight, isEnabled,
+                                     g_lolForeground, overOwn)) {
+                g_mousePressed = true;
+                g_mouseBlockedDown = button;
+                return 1;
+            }
+        } else {
+            // Releasing the button that drives the current mode ends the hold.
+            if (button == g_mouseMode) {
+                g_mousePressed = false;
+            }
+            // Swallow the up ONLY for the button whose down we swallowed.
+            if (g_mouseBlockedDown == button) {
+                g_mouseBlockedDown = MOUSE_MODE_OFF;
+                return 1;
+            }
+        }
+    }
+    return CallNextHookEx(hMouseHook, nCode, wParam, lParam);
+}
+
 void UpdateUI() {
     // Repaint only when the state actually changed. One full repaint costs
     // ~126us (max ~1.2ms measured) and it runs on the same thread that services
@@ -945,6 +1209,8 @@ void UpdateUI() {
         if (g_keys[i].selected) bits |= (2u << i);
     }
     if (g_chainMode) bits |= (2u << KEY_COUNT);
+    // Mouse mode is 3 states, so it needs two bits of its own above chain mode.
+    bits |= ((unsigned)(g_mouseMode & 3) << (KEY_COUNT + 2));
 
     const int interval = g_intervalMs;
     if (bits == lastBits && interval == lastInterval) {
@@ -975,6 +1241,20 @@ void SendKey(DWORD vk) {
     BYTE scanCode = (BYTE)MapVirtualKey(vk, MAPVK_VK_TO_VSC);
     keybd_event((BYTE)vk, scanCode, 0, 0);
     keybd_event((BYTE)vk, scanCode, KEYEVENTF_KEYUP, 0);
+}
+
+// Called ONLY from the worker thread, exactly like SendKey. No MOUSEEVENTF_MOVE
+// and no coordinates, so the click lands wherever the cursor already is and the
+// cursor is never moved. Touches no GDI object and no HWND: the worker outlives
+// the brushes and fonts freed in WM_DESTROY.
+void SendMouseClick(int mode) {
+    if (mode == MOUSE_MODE_RIGHT) {
+        mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+    } else if (mode == MOUSE_MODE_LEFT) {
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+    }
 }
 
 // Worker-local PRNG. xorshift32 instead of <random> to keep the statically
@@ -1019,13 +1299,21 @@ DWORD WINAPI WorkerThreadProc(LPVOID) {
         bool sentAny = false;
         if (isEnabled) {
             if (g_chainMode) {
-                // One read of the hold state per cycle, then fire the whole chain
-                if (AnyKeyActive()) {
+                // One read of the hold state per cycle, then fire the whole
+                // chain. A held mouse button counts as a trigger too, so the
+                // chain can be driven from the mouse alone.
+                if (AnyKeyActive() || MouseActive()) {
                     for (int i = 0; i < KEY_COUNT; i++) {
                         if (g_keys[i].selected) {
                             SendKey(g_keys[i].vk);
                             sentAny = true;
                         }
+                    }
+                    // The click closes the burst, after every selected key.
+                    const int mode = g_mouseMode;
+                    if (mode != MOUSE_MODE_OFF) {
+                        SendMouseClick(mode);
+                        sentAny = true;
                     }
                 }
             } else {
@@ -1034,6 +1322,11 @@ DWORD WINAPI WorkerThreadProc(LPVOID) {
                         SendKey(g_keys[i].vk);
                         sentAny = true;
                     }
+                }
+                // Standalone: only while its own button is physically held.
+                if (MouseActive()) {
+                    SendMouseClick(g_mouseMode);
+                    sentAny = true;
                 }
             }
         }
@@ -1047,7 +1340,8 @@ DWORD WINAPI WorkerThreadProc(LPVOID) {
             const int ticks = IntervalToTicks(g_intervalMs, Rnd01(rngState), Rnd01(rngState));
             for (int i = 0; i < ticks && !g_exitThread; i++) {
                 Sleep(1);
-                if (!isEnabled || !AnyKeyActive()) break; // Stop on release
+                // Stop on release (key or mouse button)
+                if (!isEnabled || (!AnyKeyActive() && !MouseActive())) break;
             }
         } else {
             // Idle poll: one timer tick (TICK_MS, ~15.5ms) in practice
@@ -1124,8 +1418,14 @@ VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
     // Only process window objects
     if (idObject != OBJID_WINDOW) return;
 
-    // Check if the new foreground window is League of Legends
-    if (IsLeagueOfLegendsWindow(hwnd)) {
+    // Check if the new foreground window is League of Legends. The result is
+    // also cached for the mouse hook's foreground gate (g_lolForeground) - it
+    // must be refreshed on EVERY change, not only when isEnabled flips, or a
+    // manual F2/F3 would leave the gate stale.
+    const bool isLoL = IsLeagueOfLegendsWindow(hwnd);
+    g_lolForeground = isLoL;
+
+    if (isLoL) {
         // Auto-enable when LoL gains focus
         if (!isEnabled) {
             isEnabled = true;
