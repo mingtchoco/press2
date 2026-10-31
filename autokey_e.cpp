@@ -30,8 +30,8 @@ constexpr int KEY_ROW_W = KEY_COLS * KEY_CELL_W;
 constexpr int KEY_GRID_H = KEY_ROWS * KEY_CELL_H;
 
 // What a grid slot does. keyIndex is the g_keys index for Key slots and -1
-// otherwise. The two mouse buttons are separate kinds (not one 3-state cell)
-// because each is an independent on/off toggle, exactly like a key.
+// otherwise. The two mouse buttons are separate kinds (not one cell shared
+// between them) because each is an independent cell, exactly like a key.
 struct GridSlot {
     enum Kind { Key, Star, MouseLeft, MouseRight };
     Kind kind;
@@ -102,10 +102,9 @@ static_assert(EveryKeyHasOneSlot(), "each key needs exactly one grid slot");
 static_assert(CountSlotKind(GridSlot::Star) == 1, "exactly one chain-mode star slot");
 static_assert(CountSlotKind(GridSlot::MouseLeft) == 1, "exactly one left-click slot");
 static_assert(CountSlotKind(GridSlot::MouseRight) == 1, "exactly one right-click slot");
-// UpdateUI packs isEnabled into bit 0, the per-key selection into bits
-// 1..KEY_COUNT, chain mode into bit KEY_COUNT+1 and the two mouse buttons into
-// bits KEY_COUNT+2..KEY_COUNT+3, all in one unsigned.
-static_assert(1 + KEY_COUNT + 1 + 2 <= 32, "UpdateUI guard bits");
+// The UpdateUI guard packs TWO bits per cell (every cell is a 3-state mode),
+// so the width check lives next to the CELL_* constants below - MOUSE_COUNT is
+// not declared yet at this point.
 
 // Settings are written to the ini on a debounce timer so that a burst of
 // wheel notches does not do one file write per notch on the thread that also
@@ -149,12 +148,29 @@ constexpr int INTERVAL_STEP_MS = 5;        // slider/wheel granularity
 constexpr int DEFAULT_INTERVAL_MS = 150;   // on the step grid
 constexpr int JITTER_MS = 6;               // +/- randomisation per send cycle
 
-// Mouse click repeat: the L and R grid cells are two INDEPENDENT on/off
-// toggles, not one 3-state cycle, so both buttons can be armed and held at the
-// same time. Index into g_mouse below; the ini holds one value per button.
+// Mouse click repeat: the L and R grid cells are two INDEPENDENT cells, not one
+// cell cycling between the buttons, so both can be armed and held at the same
+// time. Index into g_mouse below; the ini holds one value per button.
 constexpr int MOUSE_LEFT = 0;
 constexpr int MOUSE_RIGHT = 1;
 constexpr int MOUSE_COUNT = 2;
+
+// Every toggle cell (each key and each mouse button) is a 3-state mode, cycled
+// by a click: OFF -> SOLO -> CHAIN -> OFF.
+//   SOLO  - the cell fires on its OWN hold only.
+//   CHAIN - while the star is on, holding ANY chain cell fires EVERY chain cell
+//           in the same cycle; with the star off a chain cell behaves like solo.
+// "Armed" (the old boolean "selected") is simply mode != CELL_OFF: the hooks,
+// the keyup symmetry and the ini all use that meaning.
+constexpr int CELL_OFF = 0;
+constexpr int CELL_SOLO = 1;
+constexpr int CELL_CHAIN = 2;
+constexpr int CELL_MODE_COUNT = 3;
+
+// UpdateUI packs isEnabled into bit 0, then TWO bits per key, then chain mode,
+// then two bits per mouse button - 32 bits at the current counts, so the guard
+// is an unsigned long long and this is the width that must hold.
+static_assert(1 + 2 * KEY_COUNT + 1 + 2 * MOUSE_COUNT <= 64, "UpdateUI guard bits");
 
 // League of Legends process detection
 constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
@@ -176,6 +192,11 @@ constexpr COLORREF KEY_ON_TEXT_COLOR = RGB(255, 255, 255);
 constexpr COLORREF KEY_OFF_TEXT_COLOR = RGB(120, 120, 120);
 constexpr COLORREF SLIDER_TEXT_COLOR = RGB(0, 0, 0);        // ms readout
 
+// A CHAIN cell keeps its SOLO background and gets a gold inner frame this many
+// pixels thick (the star's own colour, so the chain look and the star match).
+// Purely a paint detail - it changes no geometry, so no layout constant moves.
+constexpr int CHAIN_BORDER = 2;
+
 // Per-key state.
 // EVERY field here is written ONLY from the main thread - the hook callback,
 // WinEventProc and WindowProc all run on the thread that installed the hook,
@@ -185,28 +206,28 @@ struct KeyEntry {
     DWORD vk;                     // virtual key code
     const wchar_t* label;         // text drawn in the toggle grid, also the .ini key name
     bool isUltimate;              // drawn in the accent colour (fires on cooldown)
-    volatile bool selected;       // user turned this key on
+    volatile int mode;            // CELL_OFF / CELL_SOLO / CELL_CHAIN
     volatile bool pressed;        // physically held right now
     volatile bool weBlockedDown;  // we swallowed the keydown, so we must swallow the keyup
 };
 
-// E defaults on to preserve the original behaviour. R, the number row and the
-// item keys default off on purpose. '1'..'7' are the main keyboard row, not the
-// numpad.
+// E defaults to SOLO to preserve the original behaviour. R, the number row and
+// the item keys default off on purpose. '1'..'7' are the main keyboard row, not
+// the numpad.
 KeyEntry g_keys[KEY_COUNT] = {
-    { 'Q', L"Q", false, false, false, false },
-    { 'W', L"W", false, false, false, false },
-    { 'E', L"E", false, true,  false, false },
-    { 'R', L"R", true,  false, false, false },
-    { '1', L"1", false, false, false, false },
-    { '2', L"2", false, false, false, false },
-    { '3', L"3", false, false, false, false },
-    { '4', L"4", false, false, false, false },
-    { '5', L"5", false, false, false, false },
-    { '6', L"6", false, false, false, false },
-    { '7', L"7", false, false, false, false },
-    { 'D', L"D", false, false, false, false },
-    { 'F', L"F", false, false, false, false },
+    { 'Q', L"Q", false, CELL_OFF,  false, false },
+    { 'W', L"W", false, CELL_OFF,  false, false },
+    { 'E', L"E", false, CELL_SOLO, false, false },
+    { 'R', L"R", true,  CELL_OFF,  false, false },
+    { '1', L"1", false, CELL_OFF,  false, false },
+    { '2', L"2", false, CELL_OFF,  false, false },
+    { '3', L"3", false, CELL_OFF,  false, false },
+    { '4', L"4", false, CELL_OFF,  false, false },
+    { '5', L"5", false, CELL_OFF,  false, false },
+    { '6', L"6", false, CELL_OFF,  false, false },
+    { '7', L"7", false, CELL_OFF,  false, false },
+    { 'D', L"D", false, CELL_OFF,  false, false },
+    { 'F', L"F", false, CELL_OFF,  false, false },
 };
 
 // Per-mouse-button state, the exact twin of KeyEntry: same single-writer rule
@@ -219,14 +240,14 @@ struct MouseEntry {
     DWORD downFlag;               // MOUSEEVENTF_* for the injected click
     DWORD upFlag;
     const wchar_t* label;         // text drawn in the grid cell ("L" / "R")
-    volatile bool selected;       // user turned this button on
+    volatile int mode;            // CELL_OFF / CELL_SOLO / CELL_CHAIN
     volatile bool pressed;        // physically held right now
     volatile bool weBlockedDown;  // we swallowed the down, so we owe the up
 };
 
 MouseEntry g_mouse[MOUSE_COUNT] = {
-    { MOUSEEVENTF_LEFTDOWN,  MOUSEEVENTF_LEFTUP,  L"L", false, false, false },
-    { MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, L"R", false, false, false },
+    { MOUSEEVENTF_LEFTDOWN,  MOUSEEVENTF_LEFTUP,  L"L", CELL_OFF, false, false },
+    { MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, L"R", CELL_OFF, false, false },
 };
 
 // Global variables
@@ -278,6 +299,26 @@ struct MonitorEnumData {
     bool found = false;
 };
 
+// One cycle's worth of cell state, read off the globals ONCE at the top of a
+// worker cycle. Passing a snapshot (instead of letting the policy read globals)
+// is what makes the whole SOLO/CHAIN table unit testable outside the app, and it
+// also means a mid-cycle toggle cannot change the policy half way through.
+struct CycleSnapshot {
+    int  keyMode[KEY_COUNT];
+    bool keyPressed[KEY_COUNT];
+    int  mouseMode[MOUSE_COUNT];
+    bool mousePressed[MOUSE_COUNT];
+    bool chainOn;                  // the star cell
+};
+
+// What that cycle sends: which keys, and which mouse buttons are CANDIDATES.
+// Candidates are not clicks - PickMouseClick still reduces them to at most one
+// click per cycle.
+struct CyclePlan {
+    bool sendKey[KEY_COUNT];
+    bool mouseCand[MOUSE_COUNT];
+};
+
 // Function declarations
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
@@ -299,6 +340,9 @@ bool ShouldBlockMouseDown(bool selected, bool enabled,
                           bool lolForeground, bool overOwnWindow);
 bool ShouldSwallowInjectedClick(bool anyMouseSelected, bool enabled, bool overOwnWindow);
 int  PickMouseClick(bool candLeft, bool candRight, int& nextMouse);
+int  NextCellMode(int mode);
+int  ClampCellMode(int mode);
+CyclePlan PlanCycle(const CycleSnapshot& s);
 void InitIniPath();
 void LoadSettings();
 void SaveSettings();
@@ -330,9 +374,11 @@ void ClearPressedKeys() {
     }
 }
 
+// "Armed and held": armed means mode != CELL_OFF, so SOLO and CHAIN count the
+// same here. This is the worker's early-exit test, not its send policy.
 bool AnyKeyActive() {
     for (int i = 0; i < KEY_COUNT; i++) {
-        if (g_keys[i].selected && g_keys[i].pressed) return true;
+        if (g_keys[i].mode != CELL_OFF && g_keys[i].pressed) return true;
     }
     return false;
 }
@@ -340,7 +386,7 @@ bool AnyKeyActive() {
 // The mouse twin of AnyKeyActive: some armed button is held right now.
 bool MouseActive() {
     for (int i = 0; i < MOUSE_COUNT; i++) {
-        if (g_mouse[i].selected && g_mouse[i].pressed) return true;
+        if (g_mouse[i].mode != CELL_OFF && g_mouse[i].pressed) return true;
     }
     return false;
 }
@@ -349,7 +395,7 @@ bool MouseActive() {
 // cursor-over-P2 test is worth doing, and by the injected-click gate.
 bool AnyMouseSelected() {
     for (int i = 0; i < MOUSE_COUNT; i++) {
-        if (g_mouse[i].selected) return true;
+        if (g_mouse[i].mode != CELL_OFF) return true;
     }
     return false;
 }
@@ -394,11 +440,12 @@ bool ShouldSwallowInjectedClick(bool anyMouseSelected, bool enabled, bool overOw
 }
 
 // Pure: which button does this cycle click? At most ONE click per cycle.
-// With both buttons in the running the worker alternates L, R, L, R via its own
+// With both buttons in the running the worker alternates R, L, R, L via its own
 // stack-local nextMouse (kept out of the globals so the worker stays a
-// read-only observer of them). A cycle with a single candidate fires that one
-// and leaves nextMouse untouched, so turning the second button on resumes the
-// alternation instead of restarting it. -1 means "no click this cycle".
+// read-only observer of them); it starts at MOUSE_RIGHT, so the first click of
+// a both-candidate run is the RIGHT button. A cycle with a single candidate
+// fires that one and leaves nextMouse untouched, so turning the second button
+// on resumes the alternation instead of restarting it. -1 means "no click".
 int PickMouseClick(bool candLeft, bool candRight, int& nextMouse) {
     if (candLeft && candRight) {
         const int pick = (nextMouse == MOUSE_RIGHT) ? MOUSE_RIGHT : MOUSE_LEFT;
@@ -408,6 +455,61 @@ int PickMouseClick(bool candLeft, bool candRight, int& nextMouse) {
     if (candLeft) return MOUSE_LEFT;
     if (candRight) return MOUSE_RIGHT;
     return -1;
+}
+
+// Pure: the next mode a click on a cell selects (OFF -> SOLO -> CHAIN -> OFF).
+// A value from outside the enum (hand-edited ini read before a click) lands on
+// OFF rather than wrapping to something the painter does not know.
+int NextCellMode(int mode) {
+    if (mode < CELL_OFF || mode > CELL_CHAIN) return CELL_OFF;
+    return (mode + 1) % CELL_MODE_COUNT;
+}
+
+// Pure: sanitise a mode loaded from the ini. Anything out of range is OFF.
+int ClampCellMode(int mode) {
+    if (mode < CELL_OFF || mode > CELL_CHAIN) return CELL_OFF;
+    return mode;
+}
+
+// Pure: the whole send policy for one cycle. Takes a snapshot, returns the keys
+// to send and the mouse candidates; reads no globals, so every row of the
+// policy table can be checked outside the app.
+//
+// Star OFF: a cell fires on its own hold only - SOLO and CHAIN are identical.
+// Star ON : the chain fires when ANY chain cell (key or mouse button) is held;
+//           then every chain cell goes out, while SOLO cells still only fire on
+//           their own hold. So a solo hold alone never pulls the chain, and a
+//           chain hold alone never pulls a solo cell.
+CyclePlan PlanCycle(const CycleSnapshot& s) {
+    CyclePlan p = {};
+
+    if (!s.chainOn) {
+        for (int i = 0; i < KEY_COUNT; i++) {
+            p.sendKey[i] = (s.keyMode[i] != CELL_OFF) && s.keyPressed[i];
+        }
+        for (int j = 0; j < MOUSE_COUNT; j++) {
+            p.mouseCand[j] = (s.mouseMode[j] != CELL_OFF) && s.mousePressed[j];
+        }
+        return p;
+    }
+
+    bool chainTriggered = false;
+    for (int i = 0; i < KEY_COUNT; i++) {
+        if (s.keyMode[i] == CELL_CHAIN && s.keyPressed[i]) chainTriggered = true;
+    }
+    for (int j = 0; j < MOUSE_COUNT; j++) {
+        if (s.mouseMode[j] == CELL_CHAIN && s.mousePressed[j]) chainTriggered = true;
+    }
+
+    for (int i = 0; i < KEY_COUNT; i++) {
+        p.sendKey[i] = (s.keyMode[i] == CELL_SOLO && s.keyPressed[i]) ||
+                       (s.keyMode[i] == CELL_CHAIN && chainTriggered);
+    }
+    for (int j = 0; j < MOUSE_COUNT; j++) {
+        p.mouseCand[j] = (s.mouseMode[j] == CELL_SOLO && s.mousePressed[j]) ||
+                         (s.mouseMode[j] == CELL_CHAIN && chainTriggered);
+    }
+    return p;
 }
 
 // ini key name of a mouse button: "MouseL" / "MouseR". Derived from the grid
@@ -438,10 +540,13 @@ void InitIniPath() {
 
 void LoadSettings() {
     if (!g_iniPath[0]) return;
+    // 0/1/2 == OFF/SOLO/CHAIN. An out-of-range hand-edited value becomes OFF,
+    // and an ini written before the 3-state cells reads back as SOLO, which is
+    // exactly what its "1" used to mean.
     for (int i = 0; i < KEY_COUNT; i++) {
-        UINT v = GetPrivateProfileIntW(L"Keys", g_keys[i].label,
-                                       g_keys[i].selected ? 1 : 0, g_iniPath);
-        g_keys[i].selected = (v != 0);
+        int v = (int)GetPrivateProfileIntW(L"Keys", g_keys[i].label,
+                                           (UINT)g_keys[i].mode, g_iniPath);
+        g_keys[i].mode = ClampCellMode(v);
     }
 
     // Interval is clamped AND snapped on load: a hand-edited or stale ini must
@@ -453,15 +558,15 @@ void LoadSettings() {
 
     g_chainMode = (GetPrivateProfileIntW(L"Options", L"Chain", 0, g_iniPath) != 0);
 
-    // One entry per mouse button, both defaulting off. Any non-zero value arms
-    // the cell, so a hand-edited value can never produce a state the painter
-    // and the worker do not know. The old single 3-state "Mouse" entry is
-    // deliberately NOT read any more.
+    // One entry per mouse button, both defaulting off, same 0/1/2 encoding as
+    // the keys and the same clamp, so a hand-edited value can never produce a
+    // state the painter and the worker do not know. The old single 3-state
+    // "Mouse" entry (a different encoding entirely) is deliberately NOT read.
     for (int i = 0; i < MOUSE_COUNT; i++) {
         wchar_t name[16];
         MouseIniKey(i, name, 16);
-        g_mouse[i].selected =
-            (GetPrivateProfileIntW(L"Options", name, 0, g_iniPath) != 0);
+        int v = (int)GetPrivateProfileIntW(L"Options", name, 0, g_iniPath);
+        g_mouse[i].mode = ClampCellMode(v);
     }
 }
 
@@ -485,8 +590,9 @@ void SaveSettings() {
     wchar_t keys[256];
     size_t klen = 0;
     for (int i = 0; i < KEY_COUNT; i++) {
-        AppendIniEntry(keys, 256, klen, g_keys[i].label,
-                       g_keys[i].selected ? L"1" : L"0");
+        wchar_t modeBuf[8];
+        wsprintfW(modeBuf, L"%d", g_keys[i].mode);
+        AppendIniEntry(keys, 256, klen, g_keys[i].label, modeBuf);
     }
     keys[klen] = L'\0';     // section buffers end with a double NUL
     WritePrivateProfileSectionW(L"Keys", keys, g_iniPath);
@@ -500,7 +606,9 @@ void SaveSettings() {
     for (int i = 0; i < MOUSE_COUNT; i++) {
         wchar_t name[16];
         MouseIniKey(i, name, 16);
-        AppendIniEntry(options, 128, olen, name, g_mouse[i].selected ? L"1" : L"0");
+        wchar_t modeBuf[8];
+        wsprintfW(modeBuf, L"%d", g_mouse[i].mode);
+        AppendIniEntry(options, 128, olen, name, modeBuf);
     }
     options[olen] = L'\0';
     WritePrivateProfileSectionW(L"Options", options, g_iniPath);
@@ -640,6 +748,7 @@ void DrawKeyGrid(HDC hdc) {
         HBRUSH brush = hBrushKeyOff;
         COLORREF fg = KEY_OFF_TEXT_COLOR;
         const wchar_t* text = L"";
+        bool chainCell = false;     // draw the gold inner frame
 
         if (GRID_SLOTS[i].kind == GridSlot::Star) {
             text = L"★";
@@ -649,25 +758,40 @@ void DrawKeyGrid(HDC hdc) {
             }
         } else if (GRID_SLOTS[i].kind == GridSlot::MouseLeft ||
                    GRID_SLOTS[i].kind == GridSlot::MouseRight) {
-            // Same two-state look as a key cell: grey while off, the button's
-            // own accent colour with white text while armed.
+            // Grey while off, the button's own accent colour with white text
+            // once armed; CHAIN adds the gold frame on the same background, so
+            // the two armed modes stay distinguishable at 18px.
             const int mi = (GRID_SLOTS[i].kind == GridSlot::MouseLeft)
                            ? MOUSE_LEFT : MOUSE_RIGHT;
             text = g_mouse[mi].label;
-            if (g_mouse[mi].selected) {
+            if (g_mouse[mi].mode != CELL_OFF) {
                 brush = (mi == MOUSE_LEFT) ? hBrushMouseLeft : hBrushMouseRight;
                 fg = KEY_ON_TEXT_COLOR;
+                chainCell = (g_mouse[mi].mode == CELL_CHAIN);
             }
         } else {
             const KeyEntry& key = g_keys[GRID_SLOTS[i].keyIndex];
             text = key.label;
-            if (key.selected) {
+            if (key.mode != CELL_OFF) {
                 brush = key.isUltimate ? hBrushKeyWarn : hBrushKeyOn;
                 fg = KEY_ON_TEXT_COLOR;
+                chainCell = (key.mode == CELL_CHAIN);
             }
         }
 
-        if (brush) FillRect(hdc, &cell, brush);
+        if (chainCell && hBrushStarOn) {
+            // Gold first over the whole cell, then the mode colour inset by
+            // CHAIN_BORDER: that leaves an exact CHAIN_BORDER-px frame without
+            // a pen, a brush origin or a second GDI object to leak.
+            FillRect(hdc, &cell, hBrushStarOn);
+            RECT inner = cell;
+            InflateRect(&inner, -CHAIN_BORDER, -CHAIN_BORDER);
+            if (brush && inner.right > inner.left && inner.bottom > inner.top) {
+                FillRect(hdc, &inner, brush);
+            }
+        } else if (brush) {
+            FillRect(hdc, &cell, brush);
+        }
         SetTextColor(hdc, fg);
         DrawTextW(hdc, text, -1, &cell, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
@@ -1068,24 +1192,24 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 }
 
                 if (GRID_SLOTS[idx].kind == GridSlot::Star) {
-                    // Chain mode: one held key fires every selected key.
+                    // Star: while on, one held CHAIN cell fires every CHAIN cell.
                     g_chainMode = !g_chainMode;
                 } else if (GRID_SLOTS[idx].kind == GridSlot::MouseLeft ||
                            GRID_SLOTS[idx].kind == GridSlot::MouseRight) {
-                    // Plain on/off, exactly like a key cell.
+                    // OFF -> SOLO -> CHAIN -> OFF, exactly like a key cell.
                     MouseEntry& m = g_mouse[
                         (GRID_SLOTS[idx].kind == GridSlot::MouseLeft)
                         ? MOUSE_LEFT : MOUSE_RIGHT];
-                    m.selected = !m.selected;
-                    if (!m.selected) {
+                    m.mode = NextCellMode(m.mode);
+                    if (m.mode == CELL_OFF) {
                         // Dropping the hold flag of a cell being turned off:
                         // leaving it set would look held without a press.
                         m.pressed = false;
                     }
                 } else {
                     KeyEntry& key = g_keys[GRID_SLOTS[idx].keyIndex];
-                    key.selected = !key.selected;
-                    if (!key.selected) {
+                    key.mode = NextCellMode(key.mode);
+                    if (key.mode == CELL_OFF) {
                         key.pressed = false;
                     }
                 }
@@ -1192,7 +1316,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             }
 
             // Key down: set flag (worker thread starts sending on next poll)
-            if (isDown && isEnabled && key.selected) {
+            if (isDown && isEnabled && key.mode != CELL_OFF) {
                 key.pressed = true;
                 key.weBlockedDown = true;
                 return 1;
@@ -1247,7 +1371,7 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
         MouseEntry& m = g_mouse[isRight ? MOUSE_RIGHT : MOUSE_LEFT];
 
         if (isDown) {
-            if (ShouldBlockMouseDown(m.selected, isEnabled,
+            if (ShouldBlockMouseDown(m.mode != CELL_OFF, isEnabled,
                                      g_lolForeground, overOwn)) {
                 m.pressed = true;
                 m.weBlockedDown = true;
@@ -1271,21 +1395,25 @@ void UpdateUI() {
     // Repaint only when the state actually changed. One full repaint costs
     // ~126us (max ~1.2ms measured) and it runs on the same thread that services
     // the keyboard hook, so skipping no-op repaints keeps the hook responsive.
-    // The guard must cover EVERY value the window shows - master state, the
-    // per-key selection, chain mode, both mouse cells and the interval readout
-    // - or a change to one of them would be silently swallowed.
+    // The guard must cover EVERY value the window shows - master state, every
+    // cell MODE (two bits each, since OFF/SOLO/CHAIN look different), chain
+    // mode and the interval readout - or a change to one of them would be
+    // silently swallowed.
     // Starts at an impossible value so the initial paint always happens.
-    static unsigned lastBits = 0xFFFFFFFFu;
+    static unsigned long long lastBits = ~0ull;
     static int lastInterval = -1;
 
-    unsigned bits = isEnabled ? 1u : 0u;
+    // bit 0: isEnabled | key i: bits 1+2i, 2+2i | star: bit 1+2*KEY_COUNT |
+    // mouse j: the two bits above that. Non-overlapping by construction, and
+    // the total width is held to 64 by the static_assert at the CELL_* block.
+    unsigned long long bits = isEnabled ? 1ull : 0ull;
     for (int i = 0; i < KEY_COUNT; i++) {
-        if (g_keys[i].selected) bits |= (2u << i);
+        bits |= ((unsigned long long)(g_keys[i].mode & 3)) << (1 + 2 * i);
     }
-    if (g_chainMode) bits |= (2u << KEY_COUNT);
-    // One bit per mouse button, directly above chain mode.
+    if (g_chainMode) bits |= (1ull << (1 + 2 * KEY_COUNT));
     for (int i = 0; i < MOUSE_COUNT; i++) {
-        if (g_mouse[i].selected) bits |= (2u << (KEY_COUNT + 1 + i));
+        bits |= ((unsigned long long)(g_mouse[i].mode & 3))
+                << (1 + 2 * KEY_COUNT + 1 + 2 * i);
     }
 
     const int interval = g_intervalMs;
@@ -1344,27 +1472,25 @@ static inline double Rnd01(unsigned& s) {
     return (double)(XorShift32(s) >> 8) * (1.0 / 16777216.0);
 }
 
-// Worker thread: polls the per-key flags and sends keys, then waits out the
-// (jittered) repeat interval as a run of Sleep(1) calls.
+// Worker thread: snapshots the per-cell flags, asks PlanCycle what to send,
+// sends it, then waits out the (jittered) repeat interval as a run of Sleep(1)
+// calls.
 //
-// Parallel mode (default): every selected key that is currently HELD is sent
-// once per cycle. Holding two keys therefore sends both at the full rate
-// rather than halving each.
+// The policy itself lives in PlanCycle (pure, unit tested). In short:
+// star OFF - every armed cell fires on its own hold, SOLO and CHAIN alike, so
+// holding two keys sends both at the full rate rather than halving each.
+// star ON  - holding any CHAIN cell (key or mouse button) fires every CHAIN
+// cell back to back inside the same cycle, a burst and not a spread, while SOLO
+// cells keep firing only on their own hold. The cycle rate is unchanged; what
+// grows is the per-cycle injection count, which scales with the number of CHAIN
+// cells rather than held ones. The hook needs no change for any of this: only
+// the physically pressed key is swallowed and the rest go out as injected input.
 //
-// Chain mode (the star button): if ANY selected key is held, every SELECTED
-// key is injected back to back within the same cycle - a burst, not a spread -
-// and then the one interval wait runs as usual. So the cycle rate is identical
-// to parallel mode; what changes is that one held key produces the whole burst
-// (holding Q with Q/W/E selected gives qwe qwe qwe). The per-cycle injection
-// count therefore scales with the number of SELECTED keys, not held ones.
-// The hook needs no change for this; only the physically pressed key is
-// swallowed and the rest go out as injected input.
-//
-// Mouse clicks: AT MOST ONE click per cycle in either mode, so adding the
+// Mouse clicks: AT MOST ONE click per cycle in either mode, so arming the
 // second button does not double the per-cycle injection count. With both
-// buttons in the running the worker alternates L, R, L, R (PickMouseClick plus
-// the stack-local nextMouse below). In chain mode the click closes the key
-// burst, as before.
+// buttons in the running the worker alternates R, L, R, L (PickMouseClick plus
+// the stack-local nextMouse below). The click always closes the cycle, after
+// every key that cycle sends.
 //
 // This thread is COMPLETELY decoupled from the hook callback, so hook chain
 // re-entry (caused by keybd_event calls) does not freeze the input pipeline.
@@ -1373,54 +1499,41 @@ DWORD WINAPI WorkerThreadProc(LPVOID) {
     unsigned rngState = (unsigned)GetTickCount() ^ (unsigned)GetCurrentThreadId();
     if (rngState == 0) rngState = 0x9E3779B9u;   // xorshift must never be seeded 0
 
-    // Which button gets the next click when both are in the running. Stack
-    // local on purpose: a global would make the worker a writer of shared state
-    // and break the single-writer invariant.
-    int nextMouse = MOUSE_LEFT;
+    // Which button gets the next click when both are in the running; the right
+    // button goes first. Stack local on purpose: a global would make the worker
+    // a writer of shared state and break the single-writer invariant.
+    int nextMouse = MOUSE_RIGHT;
 
     while (!g_exitThread) {
         bool sentAny = false;
         if (isEnabled) {
-            if (g_chainMode) {
-                // One read of the hold state per cycle, then fire the whole
-                // chain. A held mouse button counts as a trigger too, so the
-                // chain can be driven from the mouse alone.
-                if (AnyKeyActive() || MouseActive()) {
-                    for (int i = 0; i < KEY_COUNT; i++) {
-                        if (g_keys[i].selected) {
-                            SendKey(g_keys[i].vk);
-                            sentAny = true;
-                        }
-                    }
-                    // The click closes the burst, after every selected key.
-                    // Chain mode does not need the button held, so every armed
-                    // cell is a candidate - and still only ONE click goes out.
-                    const int click = PickMouseClick(g_mouse[MOUSE_LEFT].selected,
-                                                     g_mouse[MOUSE_RIGHT].selected,
-                                                     nextMouse);
-                    if (click >= 0) {
-                        SendMouseClick(click);
-                        sentAny = true;
-                    }
-                }
-            } else {
-                for (int i = 0; i < KEY_COUNT; i++) {
-                    if (g_keys[i].selected && g_keys[i].pressed) {
-                        SendKey(g_keys[i].vk);
-                        sentAny = true;
-                    }
-                }
-                // Standalone: a button is a candidate only while it is armed
-                // AND physically held. One click per cycle, alternating when
-                // both buttons are held.
-                const int click = PickMouseClick(
-                    g_mouse[MOUSE_LEFT].selected && g_mouse[MOUSE_LEFT].pressed,
-                    g_mouse[MOUSE_RIGHT].selected && g_mouse[MOUSE_RIGHT].pressed,
-                    nextMouse);
-                if (click >= 0) {
-                    SendMouseClick(click);
+            // One read of the shared state per cycle, then a pure decision.
+            CycleSnapshot snap;
+            for (int i = 0; i < KEY_COUNT; i++) {
+                snap.keyMode[i] = g_keys[i].mode;
+                snap.keyPressed[i] = g_keys[i].pressed;
+            }
+            for (int j = 0; j < MOUSE_COUNT; j++) {
+                snap.mouseMode[j] = g_mouse[j].mode;
+                snap.mousePressed[j] = g_mouse[j].pressed;
+            }
+            snap.chainOn = g_chainMode;
+
+            const CyclePlan plan = PlanCycle(snap);
+
+            // Keys in array order (Q W E R 1..7 D F), then at most one click.
+            for (int i = 0; i < KEY_COUNT; i++) {
+                if (plan.sendKey[i]) {
+                    SendKey(g_keys[i].vk);
                     sentAny = true;
                 }
+            }
+            const int click = PickMouseClick(plan.mouseCand[MOUSE_LEFT],
+                                             plan.mouseCand[MOUSE_RIGHT],
+                                             nextMouse);
+            if (click >= 0) {
+                SendMouseClick(click);
+                sentAny = true;
             }
         }
 
