@@ -12,46 +12,52 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 프로젝트 개요
 - **이름**: Press2 (AutoKey E) — 창 클래스명/타이틀은 모두 `P2`
 - **목적**: League of Legends 스킬/아이템 키 + 마우스 클릭 자동 반복 입력 유틸리티
-- **언어**: C++17 / Win32 API, 로직 전체가 단일 소스 파일 (`autokey_e.cpp`, 1535줄)
+- **언어**: C++17 / Win32 API, 로직 전체가 단일 소스 파일 (`autokey_e.cpp`, 1648줄)
 - **출력**: `autokey_e.exe` (git에 추적됨 — "빌드 산출물 커밋" 참조)
 
 ### 동작
-- **Q/W/E/R/1/2/3/4/5/6/7/D/F 중 선택한 키**를 누르고 있는 동안 worker 스레드가 그 키를 반복 전송 (원본 키는 hook에서 차단). 여러 키를 동시에 누르면 각각 **전부 같은 주기로** 나간다(분할 아님, autokey_e.cpp:1407-1412). `1`~`7`은 메인 키보드 상단 숫자키이며 넘패드가 아니다(autokey_e.cpp:193-195, 배열은 :196-210)
-- 기본 선택은 E 하나. R과 1~7·D·F는 기본 꺼짐이고, R은 쿨다운이 도는 순간 궁극기가 나가버리므로 켜면 다른 키와 구분되는 강조색으로 표시된다(`isUltimate`, autokey_e.cpp:187,200)
-- **L / R 칸은 두 개의 독립 on/off 토글**이다(2026-10-30에 과거의 3상태 `M` 순환을 폐지했다). 칸을 클릭하면 그 버튼만 켜지고(L은 파랑, R은 빨강) 켜 두면 **그 물리 버튼을 누르고 있는 동안** 원본 클릭이 차단되고 worker가 **커서가 있는 자리에** 키와 같은 주기로 클릭을 반복한다(`MouseEntry g_mouse[MOUSE_COUNT]`, autokey_e.cpp:218-230, 토글은 :1073-1084, 전송은 `SendMouseClick`:1326-1330 — 커서를 옮기지 않는다). **두 칸을 다 켜도 사이클당 클릭은 최대 1회**이며 둘 다 후보면 L R L R로 교대한다(`PickMouseClick`, :402-411). 키와 달리 **마우스 차단에는 LoL 포그라운드 게이트가 있다**("전역 키 소비 범위" 참조)
+- **키 13칸(Q/W/E/R/1~7/D/F)과 마우스 L/R 칸은 각각 3상태 토글**이다(2026-11-01): `CELL_OFF`(0) → `CELL_SOLO`(1) → `CELL_CHAIN`(2) → 다시 OFF로 **클릭마다 순환**한다(상수 autokey_e.cpp:165-168, 순환은 `NextCellMode`:463-466). **"켜진 칸" = `mode != CELL_OFF`**이고 hook 차단·keyup 대칭·ini가 전부 그 의미를 쓴다(소스 주석 :158-164). 과거의 `selected`(bool)는 제거됐다
+- **SOLO 칸은 자기 홀드에만** 반응하고, **CHAIN 칸은 ★가 켜져 있을 때만 서로 묶인다**(★ 꺼짐이면 CHAIN은 SOLO와 동작이 같다). 정책 전체가 순수 함수 `PlanCycle`에 모여 있다(autokey_e.cpp:483-513)
+- 켜진 키를 누르고 있는 동안 worker 스레드가 그 키를 반복 전송 (원본 키는 hook에서 차단). 여러 키를 동시에 누르면 각각 **전부 같은 주기로** 나간다(분할 아님, ★ 꺼짐 분기 autokey_e.cpp:486-494 → 전송 루프 :1525-1530). `1`~`7`은 메인 키보드 상단 숫자키이며 넘패드가 아니다(autokey_e.cpp:215-216, 배열은 :217-231)
+- 기본값은 **E만 `CELL_SOLO`**이고 나머지 12키와 L/R 두 칸은 모두 `CELL_OFF`다(autokey_e.cpp:217-231 / :248-251). R은 쿨다운이 도는 순간 궁극기가 나가버리므로 켜면 다른 키와 구분되는 강조색으로 표시된다(`isUltimate`, autokey_e.cpp:208,221)
+- **L / R 칸은 두 개의 독립 칸**이다(2026-10-30에 과거의 3상태 `M` 순환을 폐지해 서로 다른 두 kind로 쪼갰고, 2026-11-01에 각 칸이 키 칸과 똑같은 OFF/SOLO/CHAIN이 됐다). 켜 두면(L은 파랑, R은 빨강, CHAIN이면 금색 테두리가 더해진다) **그 물리 버튼을 누르고 있는 동안** 원본 클릭이 차단되고 worker가 **커서가 있는 자리에** 키와 같은 주기로 클릭을 반복한다(`MouseEntry` 구조체 autokey_e.cpp:239-246 / 배열 `g_mouse[MOUSE_COUNT]` :248-251, 토글은 :1197-1208, 전송은 `SendMouseClick`:1454-1458 — 커서를 옮기지 않는다). **두 칸을 다 켜도 사이클당 클릭은 최대 1회**이며 둘 다 후보면 **R L R L**로 교대한다(`PickMouseClick`, :449-458 — 시작이 R이다). 키와 달리 **마우스 차단에는 LoL 포그라운드 게이트가 있다**("전역 키 소비 범위" 참조)
 - **반복 주기는 창의 속도 슬라이더로 35~200ms를 5ms 단위로** 조절한다(기본 150ms, 실현 가능한 값은 35,40,...,200). 과거의 `E_KEY_INTERVAL` 상수는 제거됐다 — 수치와 지터는 "타이밍" 절을 먼저 읽을 것
-- **★(연동) 모드**: 켜면 선택 키 중 하나만 눌러도(또는 켜 둔 L/R 버튼만 눌러도) 선택된 키 전부가 매 사이클 연속 전송되고, 그 burst 뒤에 클릭 1회가 붙는다(`g_chainMode`, autokey_e.cpp:255, worker 분기는 :1384-1405). 연동 모드에서 클릭 후보는 `selected`뿐이라(autokey_e.cpp:1398-1400) **버튼을 누르지 않아도** L/R이 켜져 있으면 키 트리거만으로 클릭이 나간다(이전 `M` 모드와 같은 정책이다). 둘 다 켜 두면 버튼을 하나도 안 눌러도 사이클마다 L R L R로 번갈아 나가고, 그래도 사이클당 클릭은 1회다. 끄면 실제로 누른 키/버튼만 나간다
+- **★(연동) 모드**: ★ 칸만은 2상태 on/off다(`g_chainMode`, autokey_e.cpp:276, 토글 :1194-1196). 켜면 **`CELL_CHAIN` 칸끼리만 묶인다** — CHAIN 키나 CHAIN 마우스 버튼 중 **하나라도 눌려 있으면** 그것이 트리거가 되어 CHAIN 칸 전부가 매 사이클 연속 전송되고, 그 burst 뒤에 클릭 1회가 붙는다(`PlanCycle`의 ★ 켜짐 분기, autokey_e.cpp:496-511 — 트리거 판정은 :497-502). **SOLO 칸은 연동에 끌려가지 않고** 자기 홀드에만 반응하며, **SOLO 홀드만으로는 연동이 트리거되지 않는다**. CHAIN 마우스 칸은 **버튼을 누르지 않아도** CHAIN 키 홀드만으로 후보가 되고(:509-510), 두 칸이 다 CHAIN이면 사이클마다 R L R L로 번갈아 나가며 그래도 사이클당 클릭은 1회다. **★를 끄면 CHAIN은 SOLO와 완전히 같다** — 켜진 칸 중 실제로 누른 것만 나간다(:486-494)
 - F2: 활성화 / F3: 비활성화. 두 키는 **무조건·전역으로 소비**되어 다른 앱에 전달되지 않는다 ("전역 키 소비 범위" 참조)
 - LoL 포그라운드 진입 시 자동 ON, 이탈 시 자동 OFF. **F2/F3 수동 토글은 다음 포그라운드 전환까지만 유지된다** (아래 "함정" 참조)
-- 항상 위(topmost) 소형 창, 가장 왼쪽 모니터 좌상단, 작업표시줄 미표시. **제목표시줄이 없다** — 4행 그리드(`Q W E R` / `1 2 3 4` / `5 6 7 ★` / `D F L R`) 칸을 클릭해 토글하고, 그 아래 슬라이더를 클릭·드래그하거나 휠로 주기를 바꾸며, 그 밖의 영역을 좌클릭 드래그해 창을 옮기고 **우클릭으로 종료**한다(슬라이더 드래그 중 우클릭은 종료가 아니라 드래그 취소, autokey_e.cpp:1098-1108). L/R 칸이 켜져 있어도 **창 위에서의 물리 클릭은 차단하지 않으므로** 이 조작은 그대로 된다(autokey_e.cpp:376)
+- 항상 위(topmost) 소형 창, 가장 왼쪽 모니터 좌상단, 작업표시줄 미표시. **제목표시줄이 없다** — 4행 그리드(`Q W E R` / `1 2 3 4` / `5 6 7 ★` / `D F L R`) 칸을 클릭해 토글하고, 그 아래 슬라이더를 클릭·드래그하거나 휠로 주기를 바꾸며, 그 밖의 영역을 좌클릭 드래그해 창을 옮기고 **우클릭으로 종료**한다(슬라이더 드래그 중 우클릭은 종료가 아니라 드래그 취소, autokey_e.cpp:1222-1232). L/R 칸이 켜져 있어도 **창 위에서의 물리 클릭은 차단하지 않으므로** 이 조작은 그대로 된다(autokey_e.cpp:422)
 - **휠 조절은 인게임 중에 불가능하다**: 휠 메시지는 포커스 창에만 가므로 P2를 클릭해야 하고, 그러면 포그라운드가 LoL을 벗어나 `WinEventProc`가 자동 OFF시킨다(기존 설계). 주기는 게임에 들어가기 전에 맞춰 둘 것
 
 ### 키 선택과 설정 파일
-- 키 상태는 `g_keys[KEY_COUNT]`(`KeyEntry` 배열, 구조체 autokey_e.cpp:184-191 / 배열 :196-210, 현재 `KEY_COUNT = 13`, autokey_e.cpp:22) 하나에 모여 있다. hook·worker·그리기 모두 배열을 순회하므로 키를 추가할 때 손댈 곳은 배열과 `KEY_COUNT`, 그리고 아래 **슬롯 테이블**이다.
-- 마우스 버튼 상태도 **같은 모양의 배열 하나**다: `g_mouse[MOUSE_COUNT]`(`MouseEntry`, autokey_e.cpp:218-230, 인덱스 상수 `MOUSE_LEFT`/`MOUSE_RIGHT`/`MOUSE_COUNT`는 :155-157). 필드가 `KeyEntry`의 쌍둥이라(버튼별 `selected`/`pressed`/`weBlockedDown`) 키와 마우스가 같은 규칙을 공유한다 — 과거의 단일 `g_mouseMode`/`g_mousePressed`/`g_mouseBlockedDown` 전역 3개는 2026-10-30에 제거됐다
-- **그리드는 `KEY_COLS x KEY_ROWS` 고정 슬롯(현재 4x4 = 16)이고, 슬롯 index는 더 이상 `g_keys` index가 아니다.** 매핑의 단일 출처는 `GRID_SLOTS[GRID_CELL_COUNT]`(autokey_e.cpp:42-47)이고 각 슬롯은 `GridSlot::Key`(+`keyIndex`) / `Star` / `MouseLeft` / `MouseRight` 중 하나다(autokey_e.cpp:35-39). 그리기(`DrawKeyGrid`:627-676) · 히트테스트 결과 해석 · 클릭 처리(`WM_LBUTTONDOWN`:1070-1091)가 전부 이 테이블로 분기하므로, 배치를 바꿀 때 고칠 곳은 테이블 하나다. 현재 3행 끝이 ★, 4행 끝 두 칸이 L·R이고 남은 13칸이 키다. **두 마우스 버튼이 하나의 3상태 칸이 아니라 서로 다른 두 kind인 것이 핵심**이다 — 각 칸이 키 칸과 똑같은 독립 토글이 된다
-- 이 관계는 `static_assert` **5개**가 컴파일 타임에 지킨다: Key 슬롯 수 == `KEY_COUNT`(autokey_e.cpp:99-100), 키마다 정확히 1슬롯(`EveryKeyHasOneSlot`, :89-98,:101), Star 정확히 1개(:102), MouseLeft 정확히 1개(:103), MouseRight 정확히 1개(:104). 키를 늘리고 슬롯을 주지 않으면 빌드가 깨진다(조용히 엉뚱한 칸이 토글되는 대신). 여섯 번째 `static_assert(1 + KEY_COUNT + 1 + 2 <= 32)`(autokey_e.cpp:108)는 `UpdateUI` 가드 비트(`isEnabled` 1 + 키 `KEY_COUNT` + 연동 1 + 마우스 2 = 현재 17비트)가 unsigned를 넘치지 않음을 보장한다
-- 설정은 exe 옆 `autokey_e.ini`에 저장되고 시작 시 창 생성 전에 읽는다(`LoadSettings`, autokey_e.cpp:439-466). 섹션은 두 개다 — `[Keys]`: `Q`/`W`/`E`/`R`/`1`~`7`/`D`/`F` = `0`/`1` (키 이름은 `KeyEntry::label`을 그대로 쓴다), `[Options]`: `IntervalMs`(로드 시 상한 200으로 클램프한 뒤 `SnapInterval`이 5ms 격자와 하한 35로 보정, autokey_e.cpp:449-452) / `Chain`(:454) / `MouseL` · `MouseR`(버튼당 1개, 0이 아니면 켜짐, :460-465). 이름은 그리드 라벨에서 만들어지므로 칸 글자와 ini 키가 단일 출처다(`MouseIniKey`, :415-421). **구 3상태 `Mouse` 키는 의도적으로 더 이상 읽지 않는다**(:456-459 주석) — 옛 ini가 남아 있어도 L/R은 꺼진 상태로 시작한다. **마이그레이션은 없다**: `Mouse=1`(우클릭)이나 `Mouse=2`(좌클릭)로 쓰던 사용자는 업그레이드 후 두 칸이 모두 꺼진 상태로 시작하고, 첫 저장이 `[Options]` 섹션을 통째로 덮어쓰므로(`WritePrivateProfileSectionW`, :506) 그 시점에 `Mouse` 항목이 파일에서 사라진다. 의도된 동작이다 — 2상태 2개를 3상태 1개에서 복원하는 규칙은 사용자가 다시 켜는 것보다 비싸다. `.gitignore:8`에 등록돼 있으니 커밋되지 않는다
-- 토글 클릭은 `WM_LBUTTONDOWN`(autokey_e.cpp:1046-1096)에서 처리한다. 확인 대화상자는 없다(2026-08-03 제거). L/R 칸은 키 칸과 똑같은 on/off이고, 끄는 순간 **그 버튼의** `pressed`를 내린다(autokey_e.cpp:1080-1084) — 꺼진 칸에 홀드 플래그를 남기면 눌린 적 없는데 눌린 것으로 보인다(키 칸도 :1088-1090에서 같은 처리)
-- **저장 타이밍이 입력 종류마다 다르다**: 셀/★/L/R 토글과 슬라이더 드래그 종료는 즉시 쓰고(`CommitSettings`, autokey_e.cpp:516-521), 마우스 휠은 500ms 디바운스 타이머로 모아 쓴다(`MarkSettingsDirty`, autokey_e.cpp:510-513). 이유는 아래 "에러 로그 2026-10-27" 참조
-- 그리드는 STATIC 컨트롤이 아니라 `WM_PAINT`에서 직접 그린다(`DrawKeyGrid`, autokey_e.cpp:627-676). **셀 좌표의 단일 출처는 `GridCellRect`(autokey_e.cpp:526-535)** 하나이며 그리기와 히트테스트(`HitTestKeyCell`, autokey_e.cpp:617-625)가 둘 다 이것을 통과하므로, 레이아웃 상수를 바꿔도 두 경로가 어긋날 수 없다. 슬라이더도 같은 구조다(`SliderRect`, autokey_e.cpp:538-545 → `DrawSlider` / `PtInSlider`)
+- 키 상태는 `g_keys[KEY_COUNT]`(`KeyEntry` 배열, 구조체 autokey_e.cpp:205-212 / 배열 :217-231, 현재 `KEY_COUNT = 13`, autokey_e.cpp:22) 하나에 모여 있다. 칸 상태를 담는 필드는 bool이 아니라 **`volatile int mode`**(:209)다. hook·worker·그리기 모두 배열을 순회하므로 키를 추가할 때 손댈 곳은 배열과 `KEY_COUNT`, 그리고 아래 **슬롯 테이블**이다.
+- 마우스 버튼 상태도 **같은 모양의 배열 하나**다: `g_mouse[MOUSE_COUNT]`(`MouseEntry` 구조체 autokey_e.cpp:239-246 / 배열 :248-251, 인덱스 상수 `MOUSE_LEFT`/`MOUSE_RIGHT`/`MOUSE_COUNT`는 :154-156). 필드가 `KeyEntry`의 쌍둥이라(버튼별 `mode`/`pressed`/`weBlockedDown`) 키와 마우스가 같은 규칙을 공유한다 — 2026-11-01의 `selected`(bool) → `mode`(int) 교체도 **두 구조체에 동시에** 적용됐다(:209 / :243). 과거의 단일 `g_mouseMode`/`g_mousePressed`/`g_mouseBlockedDown` 전역 3개는 2026-10-30에 제거됐다
+- **그리드는 `KEY_COLS x KEY_ROWS` 고정 슬롯(현재 4x4 = 16)이고, 슬롯 index는 더 이상 `g_keys` index가 아니다.** 매핑의 단일 출처는 `GRID_SLOTS[GRID_CELL_COUNT]`(autokey_e.cpp:42-47)이고 각 슬롯은 `GridSlot::Key`(+`keyIndex`) / `Star` / `MouseLeft` / `MouseRight` 중 하나다(autokey_e.cpp:35-39). 그리기(`DrawKeyGrid`:735-800) · 히트테스트 결과 해석 · 클릭 처리(`WM_LBUTTONDOWN`:1170-1220)가 전부 이 테이블로 분기하므로, 배치를 바꿀 때 고칠 곳은 테이블 하나다. 현재 3행 끝이 ★, 4행 끝 두 칸이 L·R이고 남은 13칸이 키다. **두 마우스 버튼이 하나의 칸을 공유하지 않고 서로 다른 두 kind인 것이 핵심**이다 — 각 칸이 키 칸과 똑같은 독립 토글이 된다. 2026-11-01에 칸이 3상태가 된 것은 kind가 아니라 **그 칸의 `mode` 값**의 문제이므로 이 테이블은 한 줄도 바뀌지 않았다(★만 여전히 2상태다)
+- 이 관계는 `static_assert` **5개**가 컴파일 타임에 지킨다: Key 슬롯 수 == `KEY_COUNT`(autokey_e.cpp:99-100), 키마다 정확히 1슬롯(`EveryKeyHasOneSlot`, :89-98,:101), Star 정확히 1개(:102), MouseLeft 정확히 1개(:103), MouseRight 정확히 1개(:104). 키를 늘리고 슬롯을 주지 않으면 빌드가 깨진다(조용히 엉뚱한 칸이 토글되는 대신). 여섯 번째 `static_assert(1 + 2 * KEY_COUNT + 1 + 2 * MOUSE_COUNT <= 64)`(autokey_e.cpp:173)는 `UpdateUI` 가드 비트(`isEnabled` 1 + 키 13칸 x 2비트 + 연동 1 + 마우스 2칸 x 2비트 = 현재 **32비트**)가 `unsigned long long` 64비트를 넘치지 않음을 보장한다 — 2026-11-01에 칸이 3상태가 되면서 칸당 1비트에서 2비트로, 가드 타입도 `unsigned`에서 64비트로 올렸다
+- 설정은 exe 옆 `autokey_e.ini`에 저장되고 시작 시 창 생성 전에 읽는다(`LoadSettings`, autokey_e.cpp:541-571). 섹션은 두 개다 — `[Keys]`: `Q`/`W`/`E`/`R`/`1`~`7`/`D`/`F` = **`0`/`1`/`2`**(OFF/SOLO/CHAIN, 키 이름은 `KeyEntry::label`을 그대로 쓴다, :546-550), `[Options]`: `IntervalMs`(로드 시 상한 200으로 클램프한 뒤 `SnapInterval`이 5ms 격자와 하한 35로 보정, autokey_e.cpp:554-557) / `Chain`(0 또는 1, :559) / `MouseL` · `MouseR`(버튼당 1개, 키와 **같은 0/1/2 인코딩**, :565-570). 이름은 그리드 라벨에서 만들어지므로 칸 글자와 ini 키가 단일 출처다(`MouseIniKey`, :517-523)
+- **ini 값은 들어오는 즉시 `ClampCellMode`를 통과한다**(autokey_e.cpp:469-472, 호출은 :549 / :569). 범위를 벗어난 손편집 값(`3`, `-1` 등)은 OFF가 되므로 그리기·worker가 모르는 상태가 생길 수 없다. **하위 호환은 인코딩이 그냥 겹친 결과다**: 2026-11-01 이전 ini의 `1`은 "켜짐"이었고 지금 `1`은 SOLO이므로, 옛 파일은 **단독 ON으로 그대로 읽힌다**(마이그레이션 코드가 없다). CHAIN을 쓰려면 사용자가 칸을 한 번 더 클릭한다
+- **함정 — 구 ini에서 올라오면 ★가 켜져 있어도 연동이 아무 효과가 없다**(존재 != 발동): `[Keys]`의 옛 `1`은 전부 SOLO로 로드되는데 `[Options]`의 `Chain=1`은 그대로 살아 있으므로, **★ 칸은 켜진 색인데 CHAIN 칸이 0개**인 상태가 된다. ★는 CHAIN 칸끼리만 묶으므로(`PlanCycle`:496-511) 이 상태의 ★는 한 글자도 바꾸지 않는다. 업그레이드 후 연동을 쓰려면 **묶고 싶은 칸을 한 번 더 클릭해 CHAIN(금테)으로 올려야** 한다. **자동 승격은 하지 않는다** — 어느 칸을 묶을지는 사용자 결정이고, "켜져 있던 칸 전부를 CHAIN으로"는 2026-11-01 이전의 연동 동작(켜진 키 전부 묶기)을 되살리는 셈이라 이번 변경의 요지와 반대다
+- **구 3상태 `Mouse` 키(2026-10-28~10-30의 `M` 칸)는 의도적으로 더 이상 읽지 않는다**(:561-564 주석) — 옛 ini가 남아 있어도 L/R은 꺼진 상태로 시작하고, 첫 저장이 `[Options]` 섹션을 통째로 덮어쓰므로(`WritePrivateProfileSectionW`, :614) 그 시점에 `Mouse` 항목이 파일에서 사라진다. 의도된 동작이다 — 그 키의 인코딩은 지금의 0/1/2와 의미가 전혀 다르다. `.gitignore:8`에 등록돼 있으니 커밋되지 않는다
+- 토글 클릭은 `WM_LBUTTONDOWN`(autokey_e.cpp:1170-1220)에서 처리한다. 확인 대화상자는 없다(2026-08-03 제거). 키 칸·L/R 칸 모두 `NextCellMode`로 한 단계 순환하고(마우스 :1203 / 키 :1211), **OFF로 돌아가는 순간 그 칸의 `pressed`를 내린다**(마우스 :1204-1208 / 키 :1212-1214) — 꺼진 칸에 홀드 플래그를 남기면 눌린 적 없는데 눌린 것으로 보인다. ★ 칸만 `g_chainMode` 반전이다(:1194-1196)
+- **저장 타이밍이 입력 종류마다 다르다**: 셀/★/L/R 토글과 슬라이더 드래그 종료는 즉시 쓰고(`CommitSettings`, autokey_e.cpp:624-629), 마우스 휠은 500ms 디바운스 타이머로 모아 쓴다(`MarkSettingsDirty`, autokey_e.cpp:618-621). 이유는 아래 "에러 로그 2026-10-27" 참조
+- 그리드는 STATIC 컨트롤이 아니라 `WM_PAINT`에서 직접 그린다(`DrawKeyGrid`, autokey_e.cpp:735-800). **셀 좌표의 단일 출처는 `GridCellRect`(autokey_e.cpp:634-643)** 하나이며 그리기와 히트테스트(`HitTestKeyCell`, autokey_e.cpp:725-733)가 둘 다 이것을 통과하므로, 레이아웃 상수를 바꿔도 두 경로가 어긋날 수 없다. 슬라이더도 같은 구조다(`SliderRect`, autokey_e.cpp:646-653 → `DrawSlider` / `PtInSlider`)
 
 ### 레이아웃 — 창 크기는 콘텐츠에서 역산한다
-하드코딩된 창 크기 상수는 **없다**. `MARGIN` / `ROW_GAP` / `KEY_CELL_W` / `KEY_CELL_H` / `LABEL_HEIGHT` / `SLIDER_FONT_SIZE`에서 `CLIENT_WIDTH` · `CLIENT_HEIGHT`를 계산하고(autokey_e.cpp:13-76), `WinMain`이 `AdjustWindowRectEx(WINDOW_STYLE, WINDOW_EX_STYLE)`(autokey_e.cpp:810-811)로 프레임 두께를 더해 `CreateWindowExW`(:814-822)에 넘긴다. 그 결과 클라이언트 영역이 정확히 콘텐츠 크기(**76x132**, 창 **78x134** — 2026-10-30 4행 확장 후 상수 계산값)가 되고 여백이 남지 않는다.
+하드코딩된 창 크기 상수는 **없다**. `MARGIN` / `ROW_GAP` / `KEY_CELL_W` / `KEY_CELL_H` / `LABEL_HEIGHT` / `SLIDER_FONT_SIZE`에서 `CLIENT_WIDTH` · `CLIENT_HEIGHT`를 계산하고(autokey_e.cpp:13-76), `WinMain`이 `AdjustWindowRectEx(WINDOW_STYLE, WINDOW_EX_STYLE)`(autokey_e.cpp:934-935)로 프레임 두께를 더해 `CreateWindowExW`(:938-946)에 넘긴다. 그 결과 클라이언트 영역이 정확히 콘텐츠 크기(**76x132**, 창 **78x134** — 2026-10-30 4행 확장 후 상수 계산값)가 되고 여백이 남지 않는다.
 
 콘텐츠는 위에서 아래로 상태 라벨(`LABEL_HEIGHT` 24) → 키 그리드 4행(`KEY_GRID_H` = `KEY_ROWS * KEY_CELL_H` = 80) → 슬라이더 행(`SLIDER_H` = `SLIDER_FONT_SIZE + 4` = 20)이다. 슬라이더 행 높이를 눈대중으로 정하지 말 것 — ms 숫자를 트랙 가운데에 그리므로 폰트 크기에서 역산해야 글리프가 세로로 잘리지 않는다(autokey_e.cpp:69-73).
 
 `WINDOW_STYLE`은 `WS_POPUP | WS_BORDER`다 — **제목표시줄이 없다.** `WS_CAPTION`은 세로 29px를 먹었고 그건 전체 창 높이의 3분의 1이었다. 제목표시줄을 없앤 대가로 두 가지를 직접 구현했으므로 스타일을 바꿀 때 함께 봐야 한다:
-- **이동**: `WM_LBUTTONDOWN`이 슬라이더·그리드 셀 바깥이면 `ReleaseCapture()` 후 `SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)`로 기본 이동 루프에 넘긴다(autokey_e.cpp:1061-1068). 이 루프는 메시지를 계속 펌핑하므로 드래그 중에도 키보드 훅은 정상 동작한다. **판정 순서는 슬라이더 → 그리드 셀 → 창 이동**이며, 슬라이더가 먼저여야 트랙 클릭이 창 이동으로 새지 않는다.
-- **종료**: 닫기 버튼이 없으므로 `WM_RBUTTONDOWN`이 `WM_CLOSE`를 보낸다(autokey_e.cpp:1110). 단 슬라이더 드래그 중이면 종료가 아니라 드래그만 취소한다 — 드래그 도중 잘못 누른 두 번째 버튼으로 앱이 사라지는 것이 최악의 결과이기 때문이다(autokey_e.cpp:1098-1108).
-- **두 조작 모두 마우스 훅의 "자기 창 위 예외"에 의존한다**: L/R 칸으로 좌/우 버튼이 차단 대상이 되어도 커서가 P2 위에 있으면 물리 클릭을 삼키지 않는다(`ShouldBlockMouseDown`의 `overOwnWindow` 가드, autokey_e.cpp:376). 이 가드를 지우면 R 칸이 켜진 동안 **앱을 종료할 방법이 없어지고** L 칸이 켜진 동안은 셀도 슬라이더도 못 누른다.
+- **이동**: `WM_LBUTTONDOWN`이 슬라이더·그리드 셀 바깥이면 `ReleaseCapture()` 후 `SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)`로 기본 이동 루프에 넘긴다(autokey_e.cpp:1185-1192). 이 루프는 메시지를 계속 펌핑하므로 드래그 중에도 키보드 훅은 정상 동작한다. **판정 순서는 슬라이더 → 그리드 셀 → 창 이동**이며, 슬라이더가 먼저여야 트랙 클릭이 창 이동으로 새지 않는다.
+- **종료**: 닫기 버튼이 없으므로 `WM_RBUTTONDOWN`이 `WM_CLOSE`를 보낸다(autokey_e.cpp:1234). 단 슬라이더 드래그 중이면 종료가 아니라 드래그만 취소한다 — 드래그 도중 잘못 누른 두 번째 버튼으로 앱이 사라지는 것이 최악의 결과이기 때문이다(autokey_e.cpp:1222-1232).
+- **두 조작 모두 마우스 훅의 "자기 창 위 예외"에 의존한다**: L/R 칸으로 좌/우 버튼이 차단 대상이 되어도 커서가 P2 위에 있으면 물리 클릭을 삼키지 않는다(`ShouldBlockMouseDown`의 `overOwnWindow` 가드, autokey_e.cpp:422). 이 가드를 지우면 R 칸이 켜진 동안 **앱을 종료할 방법이 없어지고** L 칸이 켜진 동안은 셀도 슬라이더도 못 누른다.
 
 - 예전에는 `WINDOW_WIDTH/HEIGHT`를 직접 넘겨서 클라이언트가 84x96이 되고 우측 14px·하단 24px가 비어 있었다. **창 크기를 다시 하드코딩하지 말 것** — 프레임 두께는 시스템/테마마다 다르다.
 - 폭은 키 개수가 아니라 **열 수**에서 나온다(`KEY_ROW_W = KEY_COLS * KEY_CELL_W`, autokey_e.cpp:29). 그래서 키를 4개 → 7개 → 10개 → 13개로 늘리는 동안 창 폭은 한 번도 바뀌지 않고 높이만 행 단위로 늘었다(1행 → 2행 → 3행 → 4행). 열을 늘리면 `CLIENT_WIDTH`가 자동으로 따라 넓어지므로 창 크기는 손댈 필요가 없다.
-- **그리드에 `R` 라벨이 두 개 있다**: 1행 4열은 궁극기 키 R(켜면 주황 `KEY_WARN_BG_COLOR`, autokey_e.cpp:170), 4행 4열은 마우스 우클릭 R(켜면 빨강 `MOUSE_RIGHT_BG_COLOR`, :173)이다. 18px 칸에 글자를 하나만 그리므로 **구분은 위치와 색뿐**이고, 두 색을 비슷하게 바꾸면 "R을 켰는데 우클릭이 켜졌다" 같은 오독이 생긴다. 색을 손댈 때 이 두 상수를 함께 볼 것.
+- **그리드에 `R` 라벨이 두 개 있다**: 1행 4열은 궁극기 키 R(켜면 주황 `KEY_WARN_BG_COLOR`, autokey_e.cpp:186), 4행 4열은 마우스 우클릭 R(켜면 빨강 `MOUSE_RIGHT_BG_COLOR`, :189)이다. 18px 칸에 글자를 하나만 그리므로 **구분은 위치와 색뿐**이고, 두 색을 비슷하게 바꾸면 "R을 켰는데 우클릭이 켜졌다" 같은 오독이 생긴다. 색을 손댈 때 이 두 상수를 함께 볼 것.
+- **CHAIN 표시는 바탕색이 아니라 테두리다**: SOLO와 CHAIN은 **같은 바탕색**을 쓰고, CHAIN 칸에만 ★와 같은 금색(`STAR_ON_BG_COLOR`, autokey_e.cpp:188)으로 `CHAIN_BORDER` = 2px 안쪽 테두리를 더 그린다(:195-198, 그리기는 `DrawKeyGrid`:782-791). 구현은 "칸 전체를 금색으로 칠한 뒤 `InflateRect(-2)` 한 사각형을 모드 색으로 덮는" 2회 `FillRect`이므로 **펜도 새 GDI 객체도 없다**(누수 지점이 늘지 않는다). 18px 칸에서 세 번째 바탕색을 쓰면 L(파랑)·R(빨강)·궁극기(주황)와 구분이 무너지므로 색이 아니라 테두리를 택했고, 금색을 쓴 것은 "이 칸이 ★에 묶인다"를 ★ 칸과 같은 색으로 읽히게 하려는 것이다. **기하는 전혀 바뀌지 않으므로 레이아웃 상수는 한 개도 움직이지 않았다.**
 - 상태 라벨 · 키 그리드 · 슬라이더는 폭을 공유한다(`LABEL_WIDTH = SLIDER_W = KEY_ROW_W`, autokey_e.cpp:52,65). 셋의 우측 끝이 어긋나면 이 관계가 깨진 것이다.
 - 슬라이더는 SCROLLBAR 컨트롤이 아니라 owner-drawn이다. 72px 트랙에 실제 스크롤바를 쓰면 화살표 버튼 두 개가 트랙을 거의 다 먹어 35~200ms를 표현할 픽셀이 몇 개 남지 않는다(autokey_e.cpp:58-62). **썸 바도 없다** — 초록 채움의 오른쪽 끝이 곧 현재값 표시이며, 그 자리에 어두운 썸을 그리면 트랙 중앙의 검은 숫자와 겹친다(autokey_e.cpp:66-68).
-- 픽셀 대비 값은 이제 1:1이 아니다. 71 픽셀 스텝에 165ms 범위라 **픽셀당 ~2.3ms인데 값 격자는 5ms**이므로, 인접한 두세 픽셀이 같은 값을 낸다(`SliderXToInterval` → `SnapInterval`, autokey_e.cpp:572-579). 그래서 드래그로는 한 스텝씩 걷기 어렵고 그 역할은 휠이 맡는다(`NudgeInterval`, :604-613). 양 끝 픽셀은 `MIN_INTERVAL_MS`/`MAX_INTERVAL_MS`에 정확히 떨어진다(두 값이 5의 배수라 스냅이 끝단을 밀지 않는다).
+- 픽셀 대비 값은 이제 1:1이 아니다. 71 픽셀 스텝에 165ms 범위라 **픽셀당 ~2.3ms인데 값 격자는 5ms**이므로, 인접한 두세 픽셀이 같은 값을 낸다(`SliderXToInterval` → `SnapInterval`, autokey_e.cpp:680-687). 그래서 드래그로는 한 스텝씩 걷기 어렵고 그 역할은 휠이 맡는다(`NudgeInterval`, :712-721). 양 끝 픽셀은 `MIN_INTERVAL_MS`/`MAX_INTERVAL_MS`에 정확히 떨어진다(두 값이 5의 배수라 스냅이 끝단을 밀지 않는다).
 
 ---
 
@@ -74,10 +80,10 @@ Bash 도구에서는 `export PATH="/c/msys64/mingw64/bin:$PATH"`.
 
 `build.bat`은 실패 시 `pause`로 입력을 대기하므로 비대화형 실행에서 멈춘다. 컴파일 오류만 빠르게 확인하려면 2단계 g++ 명령을 직접 실행할 것.
 
-3단계 `strip`은 `where strip`이 실패하면 **경고만 내고 조용히 건너뛴다**(build.bat:44-50). 실제로 그 일이 벌어져 f6172b6부터 2026-08-03까지 커밋된 exe가 strip 안 된 148,561바이트로 남아 있었다. 현행 소스의 정상 크기는 **36,864바이트**(2026-10-30 실측, strip 적용)이며 2026-10-28 당시는 35,840바이트, 2026-10-27 당시는 33,792바이트, 2026-08-03 당시는 25,088바이트였다. 빌드 후 크기가 100KB를 넘으면 strip이 건너뛰어진 것이다 — `/c/msys64/mingw64/bin/objdump.exe -h autokey_e.exe | grep -c debug`가 0인지 확인할 것(2026-10-30 실측: 0).
+3단계 `strip`은 `where strip`이 실패하면 **경고만 내고 조용히 건너뛴다**(build.bat:44-50). 실제로 그 일이 벌어져 f6172b6부터 2026-08-03까지 커밋된 exe가 strip 안 된 148,561바이트로 남아 있었다. 현행 소스의 정상 크기는 **38,912바이트**(2026-11-01 실측, strip 적용)이며 2026-10-30 당시는 36,864바이트, 2026-10-28 당시는 35,840바이트, 2026-10-27 당시는 33,792바이트, 2026-08-03 당시는 25,088바이트였다. 빌드 후 크기가 100KB를 넘으면 strip이 건너뛰어진 것이다 — `/c/msys64/mingw64/bin/objdump.exe -h autokey_e.exe | grep -c debug`가 0인지 확인할 것(2026-11-01 실측: 0).
 
 ### 링크 플래그 vs 실제 import
-`objdump -p autokey_e.exe | grep "DLL Name"` → 현재 import는 **GDI32 / KERNEL32 / msvcrt / USER32 4개뿐**이며 winmm.dll은 없다(2026-10-30 재확인). "타이밍 제약"의 winmm 미링크는 실측 확인된 사실이며, 이 명령이 회귀 감시 수단이다. 2026-10-28에 추가된 `mouse_event`/`GetWindowRect`도 USER32라 **새 import가 생기지 않았다** — 즉 import 4줄은 마우스 훅 추가와 2026-10-30의 L/R 분리 이후에도 그대로다.
+`objdump -p autokey_e.exe | grep "DLL Name"` → 현재 import는 **GDI32 / KERNEL32 / msvcrt / USER32 4개뿐**이며 winmm.dll은 없다(2026-11-01 재확인). "타이밍 제약"의 winmm 미링크는 실측 확인된 사실이며, 이 명령이 회귀 감시 수단이다. 2026-10-28에 추가된 `mouse_event`/`GetWindowRect`도 USER32라 **새 import가 생기지 않았다** — 즉 import 4줄은 마우스 훅 추가, 2026-10-30의 L/R 분리, 2026-11-01의 3상태 칸·`PlanCycle` 도입 이후에도 그대로다(3상태화는 `InflateRect` 하나만 더 쓰는데 그것도 USER32다).
 
 - **주의**: `objdump`도 PATH에 없다. `/c/msys64/mingw64/bin/objdump.exe`를 직접 쓸 것. bare `objdump`는 `command not found`로 죽고 그러면 winmm grep도 exit 1이라 **"winmm 없음"과 신호가 구분되지 않는다**. `DLL Name` 4줄이 실제로 출력되는지 먼저 확인할 것.
 - `-lpsapi`: 현행 소스는 PSAPI 함수를 **하나도 호출하지 않으므로**(`#include <psapi.h>`만 autokey_e.cpp:5에 남아 있다) import 목록에 PSAPI.DLL이 안 보이는 것이 정상이다. PSAPI가 없다고 LoL 감지가 빠진 게 아니다 — 감지는 KERNEL32의 `QueryFullProcessImageNameW`로 한다("LoL 감지" 참조).
@@ -92,20 +98,23 @@ Bash 도구에서는 `export PATH="/c/msys64/mingw64/bin:$PATH"`.
 py create_icon.py
 build.bat
 ```
-`resource.rc:1`의 `1 ICON "icon.ico"`가 리소스 ID 1로 등록하고 `autokey_e.cpp:796`의 `LoadIcon(hInstance, MAKEINTRESOURCE(1))`이 참조한다 — ID 변경 시 양쪽 모두 수정.
+`resource.rc:1`의 `1 ICON "icon.ico"`가 리소스 ID 1로 등록하고 `autokey_e.cpp:920`의 `LoadIcon(hInstance, MAKEINTRESOURCE(1))`이 참조한다 — ID 변경 시 양쪽 모두 수정.
 
 ### 테스트
-**키·마우스 처리 경로는 둘 다 원리상 자동화가 불가능하다**: 키보드 훅 최상단의 `LLKHF_INJECTED` 통과(autokey_e.cpp:1154-1157)와 마우스 훅의 `LLMHF_INJECTED` 분기(autokey_e.cpp:1219, :1235-1243)가 주입 출처를 구분하지 않으므로, `SendInput`/`keybd_event`/`mouse_event`로 보낸 F2/F3·키·클릭은 판정 경로를 밟지 못한다. 마우스 쪽은 주입 입력이 `ShouldSwallowInjectedClick` 한 줄만 지나므로 **차단 판정(`ShouldBlockMouseDown`)은 합성 입력으로 영원히 도달할 수 없다.**
+**키·마우스 처리 경로는 둘 다 원리상 자동화가 불가능하다**: 키보드 훅 최상단의 `LLKHF_INJECTED` 통과(autokey_e.cpp:1279-1281)와 마우스 훅의 `LLMHF_INJECTED` 분기(autokey_e.cpp:1343, :1359-1367)가 주입 출처를 구분하지 않으므로, `SendInput`/`keybd_event`/`mouse_event`로 보낸 F2/F3·키·클릭은 판정 경로를 밟지 못한다. 마우스 쪽은 주입 입력이 `ShouldSwallowInjectedClick` 한 줄만 지나므로 **차단 판정(`ShouldBlockMouseDown`)은 합성 입력으로 영원히 도달할 수 없다.**
 
 자동 검증이 가능한 범위는 둘이다:
-- **UI 경로**: `PostMessage(WM_LBUTTONDOWN/WM_MOUSEWHEEL)`로 셀·슬라이더 좌표를 찍고 `GetClientRect`·ini 내용으로 확인한다(2026-10-30에 이 방식으로 80항목 검증 — 76x132 클라이언트, 16슬롯 비간섭 토글, 기본 150, 재시작 유지, 클램프, 레거시 `Mouse` 키 무시. 2026-10-28에는 96항목이었다).
-- **순수 함수**: 전역을 읽지 않는 함수는 앱 밖에서 그대로 단위 테스트/분포 측정이 된다 — `IntervalToTicks`(autokey_e.cpp:731-739), `SnapInterval`(:556-562), `SliderXToInterval`/`IntervalToSliderX`(:572-588), `PointInOwnWindow`(:359-361), `ShouldBlockMouseDown`(:371-378), `ShouldSwallowInjectedClick`(:392-394), `PickMouseClick`(:402-411). **LL 훅의 판정과 교대 선택을 순수 함수로 떼어낸 것이 자동 검증을 가능하게 한 유일한 장치다** — 훅 콜백이나 worker 루프 안에 조건을 인라인으로 적으면 그 분기는 다시 수동 검증 대상이 된다.
+- **UI 경로**: `PostMessage(WM_LBUTTONDOWN/WM_MOUSEWHEEL)`로 셀·슬라이더 좌표를 찍고 `GetClientRect`·ini 내용·**픽셀 색**으로 확인한다(2026-11-01에 이 방식으로 **144항목** 검증 — 76x132 클라이언트, 15칸의 3상태 순환과 칸 사이 비간섭, CHAIN 금색 테두리 픽셀, 기본 150, 재시작 유지, ini 클램프·구 `1` 호환, 레거시 `Mouse` 키 무시. 2026-10-30에는 80항목, 2026-10-28에는 96항목이었다).
+- **순수 함수**: 전역을 읽지 않는 함수는 앱 밖에서 그대로 단위 테스트/전수 대조가 된다 — `PlanCycle`(autokey_e.cpp:483-513), `NextCellMode`(:463-466), `ClampCellMode`(:469-472), `PickMouseClick`(:449-458), `PointInOwnWindow`(:405-407), `ShouldBlockMouseDown`(:417-424), `ShouldSwallowInjectedClick`(:438-440), `IntervalToTicks`(:855-863), `SnapInterval`(:664-670), `SliderXToInterval`/`IntervalToSliderX`(:680-696). **LL 훅의 판정·교대 선택·그리고 2026-11-01부터는 worker의 전송 정책까지 순수 함수로 떼어낸 것이 자동 검증을 가능하게 한 유일한 장치다** — 훅 콜백이나 worker 루프 안에 조건을 인라인으로 적으면 그 분기는 다시 수동 검증 대상이 된다.
+- **`PlanCycle`은 전수 검증된다**: 입력이 스냅샷 하나뿐이라 (칸 수 x 3상태 x 홀드 x ★) 조합을 **독립 오라클과 행 단위로 대조**할 수 있다(2026-11-01에 2,592행). worker가 전역을 읽어 그 자리에서 판단하던 구조에서는 불가능했던 검증이다.
 
-**하니스는 소스를 복사하지 말고 `#include`할 것.** 2026-10-30 검증은 `autokey_e.cpp`를 그대로 `#include`해서 **배포되는 함수 자체**를 호출했다(195 PASS: 16슬롯 기하, 차단/삼킴 진리표, `LowLevelMouseProc` 상태기계 — 두 버튼 동시 홀드에서 stuck 0, `PickMouseClick` 교대 시퀀스, 스냅, 전 픽셀 매핑, 디더링 35/150/200). 판정 로직을 하니스에 복사하면 소스가 바뀔 때 복사본만 녹색이 되는 drift가 생기고 그 녹색은 아무것도 증명하지 않는다. 하니스가 실제로 실패를 감지하는지는 **돌연변이로 확인한다** — 게이트 하나 제거, 비교 반전 같은 변형을 일부러 넣어 테스트가 깨지는지 보고 되돌린다(9종 전부 검출됨). 하니스 파일은 저장소에 커밋되어 있지 않으므로, 다시 필요하면 이 방식으로 새로 만들 것.
+**하니스는 소스를 복사하지 말고 `#include`할 것.** 2026-11-01 검증은 `autokey_e.cpp`를 그대로 `#include`해서 **배포되는 함수 자체**를 호출했다(**3,427 PASS**: `PlanCycle` 전수 2,592행 독립 오라클 대조, `PickMouseClick`의 R L R L 시퀀스, 16슬롯 기하, 차단/삼킴 진리표, `LowLevelMouseProc` 상태기계 — 두 버튼 동시 홀드에서 stuck 0, `NextCellMode`/`ClampCellMode` 순환·클램프, 스냅, 전 픽셀 매핑, 디더링 35/150/200). 판정 로직을 하니스에 복사하면 소스가 바뀔 때 복사본만 녹색이 되는 drift가 생기고 그 녹색은 아무것도 증명하지 않는다. 하니스가 실제로 실패를 감지하는지는 **돌연변이로 확인한다** — 게이트 하나 제거, 비교 반전, `nextMouse` 초기값 뒤집기 같은 변형을 일부러 넣어 테스트가 깨지는지 보고 되돌린다(2026-11-01: 순수 함수 하니스 10종 + UI 하니스 4종 = **14종 전부 검출**). 하니스 파일은 저장소에 커밋되어 있지 않으므로, 다시 필요하면 이 방식으로 새로 만들 것.
 
-**함정 — `FindWindow` 성공은 메시지 루프 준비 완료가 아니다.** 창은 `CreateWindowExW` 직후부터 찾히지만 메시지 루프는 그보다 뒤에 시작하므로(autokey_e.cpp:814 vs :898-901), 찾은 직후 `PostMessage`를 쏘면 큐에 들어간 메시지가 유실되고 "토글이 안 된다"로 오진된다. 검증 스크립트는 창을 찾은 뒤 **1초 settle**을 두고 보낼 것.
+**worker 루프 자체도 `#include` + 매크로 가로채기로 관측할 수 있다**(리뷰에서 확인한 방법): 소스를 `#include`하기 전에 `keybd_event` / `mouse_event` / `Sleep` / `GetTickCount` / `GetCurrentThreadId`를 자기 스텁으로 매크로 치환하면 `WorkerThreadProc` 본문을 그대로 돌려 **실제 호출 시퀀스**(키 전송 순서, 사이클당 클릭이 정말 1회인지, 첫 클릭이 R인지, 홀드를 떼면 대기 루프가 조기 중단하는지)를 결정론적으로 볼 수 있다. 단 **지터 시드를 고정하지 않으면 대조군이 비결정적이 되어 돌연변이 판정이 무효가 된다** — `GetTickCount`/`GetCurrentThreadId` 스텁이 상수를 돌려주게 해 `rngState`를 고정할 것.
 
-수동 검증(자동화 불가 항목): F2/F3 토글, LoL 포커스 시 ON/OFF 자동 전환, 키 홀드 시 반복 입력, **장시간 홀드 시 프리즈 없음**(짧게 누르면 과거 프리즈 버그가 재현되지 않으므로 반드시 길게), 실행 시 LoL이 이미 떠 있으면 F2 없이 ON으로 시작, ★ 연동 모드의 실제 출력, 물리 휠로 주기 조절, 그리고 **L/R 칸 전체** — 물리 버튼 홀드 시 클릭 반복, **두 칸을 다 켜고 두 버튼을 함께 홀드했을 때 실제로 L R L R로 교대하는지**, 비-LoL 앱에서 클릭이 정상 통과(포그라운드 게이트), 커서가 P2 위일 때 물리 클릭이 그대로 먹히는지, 좌/우 버튼 교차 홀드 후 stuck 없음.
+**함정 — `FindWindow` 성공은 메시지 루프 준비 완료가 아니다.** 창은 `CreateWindowExW` 직후부터 찾히지만 메시지 루프는 그보다 뒤에 시작하므로(autokey_e.cpp:938 vs :1022-1025), 찾은 직후 `PostMessage`를 쏘면 큐에 들어간 메시지가 유실되고 "토글이 안 된다"로 오진된다. 검증 스크립트는 창을 찾은 뒤 **1초 settle**을 두고 보낼 것.
+
+수동 검증(자동화 불가 항목): F2/F3 토글, LoL 포커스 시 ON/OFF 자동 전환, 키 홀드 시 반복 입력, **장시간 홀드 시 프리즈 없음**(짧게 누르면 과거 프리즈 버그가 재현되지 않으므로 반드시 길게), 실행 시 LoL이 이미 떠 있으면 F2 없이 ON으로 시작, 물리 휠로 주기 조절, **3상태의 실제 출력** — SOLO 칸이 자기 홀드에만 반응하는지, ★ 켜고 CHAIN 칸 하나를 홀드했을 때 CHAIN 칸 전부가 나가는지, 그때 SOLO 칸이 끌려가지 않는지, ★를 끄면 CHAIN이 SOLO처럼 동작하는지, 그리고 **L/R 칸 전체** — 물리 버튼 홀드 시 클릭 반복, **두 칸을 다 켜고 두 버튼을 함께 홀드했을 때 실제로 R L R L로 교대하는지(첫 클릭이 R인지)**, 비-LoL 앱에서 클릭이 정상 통과(포그라운드 게이트), 커서가 P2 위일 때 물리 클릭이 그대로 먹히는지, 좌/우 버튼 교차 홀드 후 stuck 없음.
 
 ---
 
@@ -113,156 +122,161 @@ build.bat
 
 `autokey_e.cpp`에는 5개의 **코드 컨텍스트**(키보드 hook 콜백 / 마우스 hook 콜백 / worker 스레드 / WinEvent 콜백 / WindowProc)가 있지만 **실제 스레드는 2개뿐**이다. 2026-10-28에 훅이 2개에서 3개(키보드·마우스·WinEvent)로 늘었어도 **스레드 수는 그대로다.** 이 구분이 이 프로젝트의 유일하고 핵심적인 설계다.
 
-- 키보드 hook(`SetWindowsHookEx(WH_KEYBOARD_LL)`, autokey_e.cpp:865) · 마우스 hook(`SetWindowsHookEx(WH_MOUSE_LL)`, autokey_e.cpp:868) · WinEvent 콜백(`SetWinEventHook`, autokey_e.cpp:871-879, WINEVENT_OUTOFCONTEXT)은 **셋 다 훅을 설치한 WinMain 메인 스레드**로 배달되며, `autokey_e.cpp:898-901`의 메시지 루프가 계속 펌핑돼야 호출된다. 따라서 두 hook 콜백 · WinEventProc · WindowProc(autokey_e.cpp:942)은 같은 스레드에서 **직렬 실행**된다.
-- 진짜로 분리된 스레드는 worker(`CreateThread`, autokey_e.cpp:883, `WorkerThreadProc`:1372) 하나뿐이고, **유일한 입력 전송 지점**이다(`SendKey`:1314-1320 / `SendMouseClick`:1326-1330).
+- 키보드 hook(`SetWindowsHookEx(WH_KEYBOARD_LL)`, autokey_e.cpp:989) · 마우스 hook(`SetWindowsHookEx(WH_MOUSE_LL)`, autokey_e.cpp:992) · WinEvent 콜백(`SetWinEventHook`, autokey_e.cpp:995-1003, WINEVENT_OUTOFCONTEXT)은 **셋 다 훅을 설치한 WinMain 메인 스레드**로 배달되며, `autokey_e.cpp:1022-1025`의 메시지 루프가 계속 펌핑돼야 호출된다. 따라서 두 hook 콜백 · WinEventProc · WindowProc(autokey_e.cpp:1066)은 같은 스레드에서 **직렬 실행**된다.
+- 진짜로 분리된 스레드는 worker(`CreateThread`, autokey_e.cpp:1007, `WorkerThreadProc`:1498) 하나뿐이고, **유일한 입력 전송 지점**이다(`SendKey`:1442-1448 / `SendMouseClick`:1454-1458).
 
 여기서 나오는 두 가지 함정:
-1. 메인 스레드 쪽 넷 사이에는 경합이 없으므로 락/동기화를 추가하지 말 것(실제로 파일 전체에 크리티컬 섹션·뮤텍스가 0건). 반대로 넷 중 하나가 느려지면 나머지가 같이 밀린다 — 특히 `WinEventProc`는 `IsLeagueOfLegendsWindow` → `OpenProcess` + `QueryFullProcessImageNameW`(autokey_e.cpp:1454,1466)라는 무거운 호출을 하므로 그동안 훅 처리가 지연되고, `LowLevelHooksTimeout`(기본 ~300ms)을 넘기면 해당 입력의 차단이 조용히 건너뛰어지거나 훅 자체가 해제될 수 있다. **같은 이유로 이 스레드에서 하는 파일 I/O도 위험하다** — 2026-10-27 에러 로그가 그 실례다.
-   **마우스 훅은 이 직렬 실행에서 가장 뜨거운 지점이다.** `WM_MOUSEMOVE`는 초당 수백 번 들어오므로 `LowLevelMouseProc`는 네 개의 버튼 메시지가 아니면 아무 일도 하지 않고 즉시 통과한다(autokey_e.cpp:1212-1215). "커서가 P2 위인가" 판정도 앱이 OFF이거나 L/R 두 칸이 모두 꺼져 있으면(`AnyMouseSelected`, :350-355) `GetWindowRect`조차 부르지 않는다(:1226-1233). 이 두 조기 탈출을 지우거나 그 앞에 무거운 호출을 끼우면 그 비용이 곧 전역 입력 지연이 된다.
+1. 메인 스레드 쪽 넷 사이에는 경합이 없으므로 락/동기화를 추가하지 말 것(실제로 파일 전체에 크리티컬 섹션·뮤텍스가 0건). 반대로 넷 중 하나가 느려지면 나머지가 같이 밀린다 — 특히 `WinEventProc`는 `IsLeagueOfLegendsWindow` → `OpenProcess` + `QueryFullProcessImageNameW`(autokey_e.cpp:1567,1579)라는 무거운 호출을 하므로 그동안 훅 처리가 지연되고, `LowLevelHooksTimeout`(기본 ~300ms)을 넘기면 해당 입력의 차단이 조용히 건너뛰어지거나 훅 자체가 해제될 수 있다. **같은 이유로 이 스레드에서 하는 파일 I/O도 위험하다** — 2026-10-27 에러 로그가 그 실례다.
+   **마우스 훅은 이 직렬 실행에서 가장 뜨거운 지점이다.** `WM_MOUSEMOVE`는 초당 수백 번 들어오므로 `LowLevelMouseProc`는 네 개의 버튼 메시지가 아니면 아무 일도 하지 않고 즉시 통과한다(autokey_e.cpp:1336-1339). "커서가 P2 위인가" 판정도 앱이 OFF이거나 L/R 두 칸이 모두 꺼져 있으면(`AnyMouseSelected`, :396-401 — 판정은 `mode != CELL_OFF`이므로 SOLO·CHAIN 구분 없이 "켜짐"이면 참) `GetWindowRect`조차 부르지 않는다(:1350-1357). 이 두 조기 탈출을 지우거나 그 앞에 무거운 호출을 끼우면 그 비용이 곧 전역 입력 지연이 된다.
 2. 진짜 경계는 "메인 스레드 ↔ worker 스레드"이며, `volatile` 플래그가 유일한 교차 스레드 통신 수단이다. 입력 전송이 worker에만 있어야 하는 이유가 이 경계다 — 넘으면 hook chain 재진입으로 입력 파이프라인이 프리즈한다.
 
 ### volatile 플래그가 안전한 실제 이유
-worker가 실제로 **읽는** 교차 스레드 상태는 `isEnabled`(autokey_e.cpp:241) / `g_exitThread`(:272) / `g_intervalMs`(:254) / `g_chainMode`(:255)와, `g_keys[]` 각 항목의 `selected` / `pressed`(:188-189) 및 `g_mouse[]` 각 항목의 `selected` / `pressed`(:222-223)다. 모두 `volatile`일 뿐 C++ 표준의 스레드 동기화 수단이 아니다(MinGW g++ 빌드라 MSVC의 `/volatile:ms` 획득/해제 의미론도 없다). 그럼에도 깨지지 않는 이유는 **모든 쓰기가 메인 스레드에서만 일어나는 단일 writer 구조**이기 때문이다 — 쓰기 지점은 `WinMain` / `LowLevelKeyboardProc` / `LowLevelMouseProc` / `WinEventProc` / `WindowProc`(토글 클릭 · 슬라이더 · 휠)뿐이고 다섯 다 메인 스레드에서 실행된다. `WorkerThreadProc`는 읽기만 한다. **마우스 훅이 추가됐어도 writer가 늘어난 게 아니라 같은 스레드의 writer 지점이 하나 늘어난 것뿐이다.**
+worker가 실제로 **읽는** 교차 스레드 상태는 `isEnabled`(autokey_e.cpp:262) / `g_exitThread`(:293) / `g_intervalMs`(:275) / `g_chainMode`(:276)와, `g_keys[]` 각 항목의 `mode` / `pressed`(:209-210) 및 `g_mouse[]` 각 항목의 `mode` / `pressed`(:243-244)다. 2026-11-01에 bool `selected`가 int `mode`로 바뀌었어도 **교차 스레드 값의 개수와 방향은 그대로**다(단일 writer는 여전히 메인 스레드이고 worker는 읽기만 한다). 모두 `volatile`일 뿐 C++ 표준의 스레드 동기화 수단이 아니다(MinGW g++ 빌드라 MSVC의 `/volatile:ms` 획득/해제 의미론도 없다). 그럼에도 깨지지 않는 이유는 **모든 쓰기가 메인 스레드에서만 일어나는 단일 writer 구조**이기 때문이다 — 쓰기 지점은 `WinMain` / `LowLevelKeyboardProc` / `LowLevelMouseProc` / `WinEventProc` / `WindowProc`(토글 클릭 · 슬라이더 · 휠)뿐이고 다섯 다 메인 스레드에서 실행된다. `WorkerThreadProc`는 읽기만 한다. **마우스 훅이 추가됐어도 writer가 늘어난 게 아니라 같은 스레드의 writer 지점이 하나 늘어난 것뿐이다.**
 
-`volatile`이지만 worker는 보지 않는 값도 있다: `g_keys[].weBlockedDown`(:190)과 `g_mouse[].weBlockedDown`(:224)은 해당 훅 콜백만 쓰고 읽으며, `g_lolForeground`(:263)는 `WinMain`(:888)·`WinEventProc`(:1519)가 쓰고 `LowLevelMouseProc`(:1251)가 읽는다 — 셋 다 같은 메인 스레드다. 즉 이 셋은 교차 스레드 통신이 아니고, 콜백 사이에서 값이 캐시되지 않게 하려는 보수적 선택이다. 반대로 슬라이더 드래그 상태(`g_sliderCapture`)와 저장 대기 플래그(`g_settingsDirty`)는 `WindowProc` 안에서만 쓰이므로 `volatile`을 붙이지 않았다(autokey_e.cpp:267-268). **worker가 읽어야 하는 값을 새로 추가할 때만 진짜 교차 스레드 플래그가 되므로, 그 경계를 흐리지 말 것.**
+`volatile`이지만 worker는 보지 않는 값도 있다: `g_keys[].weBlockedDown`(:211)과 `g_mouse[].weBlockedDown`(:245)은 해당 훅 콜백만 쓰고 읽으며, `g_lolForeground`(:284)는 `WinMain`(:1012)·`WinEventProc`(:1632)가 쓰고 `LowLevelMouseProc`(:1375)가 읽는다 — 셋 다 같은 메인 스레드다. 즉 이 셋은 교차 스레드 통신이 아니고, 콜백 사이에서 값이 캐시되지 않게 하려는 보수적 선택이다. 반대로 슬라이더 드래그 상태(`g_sliderCapture`)와 저장 대기 플래그(`g_settingsDirty`)는 `WindowProc` 안에서만 쓰이므로 `volatile`을 붙이지 않았다(autokey_e.cpp:288-289). **worker가 읽어야 하는 값을 새로 추가할 때만 진짜 교차 스레드 플래그가 되므로, 그 경계를 흐리지 말 것.**
 
-worker는 난수도 **스택 로컬 상태**로 돌린다(`XorShift32`/`Rnd01` autokey_e.cpp:1335-1345, `rngState` :1373). `<random>`을 안 쓴 것은 정적 링크 크기 때문이고, 전역 시드를 두지 않은 것은 단일 writer 불변식을 지키기 위해서다 — 지터용 난수 상태를 전역으로 올리면 worker가 전역에 쓰는 첫 사례가 된다. **L/R 교대 커서(`nextMouse`, :1379)도 같은 이유로 스택 로컬이다** — 어느 버튼이 다음 차례인지는 worker만 쓰고 worker만 읽으므로 전역에 둘 이유가 없고, 두면 그것이 worker의 첫 전역 쓰기가 된다.
+**worker는 그 값들을 사이클마다 한 번만 읽는다 — 스냅샷 패턴(2026-11-01).** 사이클 머리에서 `g_keys[]`·`g_mouse[]`의 `mode`/`pressed`와 `g_chainMode`를 지역 `CycleSnapshot`에 복사하고(구조체 autokey_e.cpp:306-312, 복사는 :1511-1520), 그 스냅샷만으로 `PlanCycle`이 전송 계획을 만든다(:1522). 이득이 두 가지다: (1) 정책이 전역을 전혀 읽지 않으므로 **앱 밖에서 전수 검증**이 된다, (2) 사이클 도중에 사용자가 칸을 토글해도 **그 사이클 안에서 판단이 반쯤 바뀌지 않는다**. 단 스냅샷 자체는 필드를 하나씩 복사하므로 복사 중의 토글은 여전히 섞여 들어올 수 있다 — 그 최악도 아래 불변식과 같이 "1회 추가/누락 전송"이다.
+
+**주의 — `CycleSnapshot snap;`(autokey_e.cpp:1511)은 값 초기화가 아니다.** 지금 안전한 이유는 그 뒤 5개 필드(`keyMode`/`keyPressed`/`mouseMode`/`mousePressed`/`chainOn`)에 **전부 대입이 있다**는 것뿐이다(:1512-1520). 필드를 추가하면서 대입을 빠뜨리면 미초기화 스택 값을 조용히 읽어 그 사이클의 정책이 쓰레기로 결정된다(경고도 안 난다). 필드를 늘릴 때는 선언을 `CycleSnapshot snap = {};`로 바꾸거나, `PlanCycle` 하니스의 전수표에 그 필드를 축으로 추가해 미초기화가 테스트로 드러나게 할 것.
+
+worker는 난수도 **스택 로컬 상태**로 돌린다(`XorShift32`/`Rnd01` autokey_e.cpp:1463-1473, `rngState` :1499). `<random>`을 안 쓴 것은 정적 링크 크기 때문이고, 전역 시드를 두지 않은 것은 단일 writer 불변식을 지키기 위해서다 — 지터용 난수 상태를 전역으로 올리면 worker가 전역에 쓰는 첫 사례가 된다. **L/R 교대 커서(`nextMouse`, :1505)도 같은 이유로 스택 로컬이다** — 어느 버튼이 다음 차례인지는 worker만 쓰고 worker만 읽으므로 전역에 둘 이유가 없고, 두면 그것이 worker의 첫 전역 쓰기가 된다. 초기값은 `MOUSE_RIGHT`이므로 둘 다 후보인 첫 사이클의 클릭은 **R**이다.
 
 지켜야 할 불변식:
 - worker 스레드에서 이 플래그들에 **쓰지 말 것**. 전송 후 정리 목적으로 `g_keys[i].pressed = false`(또는 `g_mouse[i].pressed = false`)를 worker에 넣으면 단일 writer 전제가 깨진다.
-- 여러 플래그를 원자적으로 함께 읽어야 하는 복합 불변식을 만들지 말 것. worker의 `selected && pressed` 검사(`AnyKeyActive`, autokey_e.cpp:333-338 / `MouseActive`, :341-346)는 순간적으로 불일치 조합을 볼 수 있으나 최악이 키·클릭 1회 추가 전송이라 무해하다.
+- 여러 플래그를 원자적으로 함께 읽어야 하는 복합 불변식을 만들지 말 것. worker의 `mode != CELL_OFF && pressed` 검사(`AnyKeyActive`, autokey_e.cpp:379-384 / `MouseActive`, :387-392)와 `CycleSnapshot` 복사(:1511-1520)는 순간적으로 불일치 조합을 볼 수 있으나 최악이 키·클릭 1회 추가/누락 전송이라 무해하다. **스냅샷은 이 성질을 바꾸지 않는다** — 스냅샷이 주는 것은 "복사가 끝난 뒤에는 한 사이클 안에서 값이 흔들리지 않는다"뿐이고, 복사 자체를 원자적으로 만들지는 않는다. 그 이상이 필요한 규칙(예: "두 칸이 정확히 동시에 켜진 순간만" 같은 조건)은 애초에 만들지 말 것.
 - 어겨야 하면 임시방편 대신 `std::atomic<bool>`로 교체하는 것이 정답이다.
 
 ### 재진입 차단
-worker가 보낸 키는 키보드 hook 최상단(autokey_e.cpp:1154-1157)의 `LLKHF_INJECTED` 체크로 즉시 통과시킨다. **이 체크를 빼면 생기는 문제는 무한 재귀가 아니라 기능 무력화다** — injected keydown이 autokey_e.cpp:1195-1198에서 다시 `return 1`로 차단돼 게임에 닿지 않고, 뒤이은 injected keyup이 autokey_e.cpp:1181-1182에서 `pressed`를 지워 반복이 매 tick 끊긴다. 재귀·프리즈는 hook 콜백 **안에서** `keybd_event`를 부르던 과거 구조의 증상이며, 현재는 입력 전송이 worker에만 있어 재귀 경로 자체가 없다.
+worker가 보낸 키는 키보드 hook 최상단(autokey_e.cpp:1279-1281)의 `LLKHF_INJECTED` 체크로 즉시 통과시킨다. **이 체크를 빼면 생기는 문제는 무한 재귀가 아니라 기능 무력화다** — injected keydown이 autokey_e.cpp:1319-1323에서 다시 `return 1`로 차단돼 게임에 닿지 않고, 뒤이은 injected keyup이 autokey_e.cpp:1305-1306에서 `pressed`를 지워 반복이 매 tick 끊긴다. 재귀·프리즈는 hook 콜백 **안에서** `keybd_event`를 부르던 과거 구조의 증상이며, 현재는 입력 전송이 worker에만 있어 재귀 경로 자체가 없다.
 
-이 체크는 주입 출처를 구분하지 않고 F2/F3·키 처리보다 위에 있으므로, **다른 프로그램이 주입한 키도 전부 무시된다**(AutoHotkey·화상 키보드·원격 데스크톱 등). 소스 주석 autokey_e.cpp:1154의 "from our worker thread"는 실제 범위보다 좁게 읽히니 주의.
+이 체크는 주입 출처를 구분하지 않고 F2/F3·키 처리보다 위에 있으므로, **다른 프로그램이 주입한 키도 전부 무시된다**(AutoHotkey·화상 키보드·원격 데스크톱 등). 소스 주석 autokey_e.cpp:1278의 "from our worker thread"는 실제 범위보다 좁게 읽히니 주의.
 
-**마우스 훅도 같은 구조인데 예외가 하나 있다.** 주입 클릭은 기본적으로 그대로 통과하지만(autokey_e.cpp:1235-1243), `ShouldSwallowInjectedClick`(:392-394)이 참이면 삼킨다 — 조건은 **ON + L/R 중 하나라도 켜짐(`AnyMouseSelected`, :350-355) + 커서가 P2 위**다. 이게 없으면 worker가 커서 자리에 쏘는 클릭이 자기 창에 떨어져 R 칸이 켜져 있으면 다음 사이클에 앱이 종료되고, L 칸이면 사이클마다 셀이 토글되며 ini까지 다시 쓰인다(2026-10-28 에러 로그). 이 게이트는 **의도적으로 `g_lolForeground`를 보지 않는다** — worker는 발사 여부를 `isEnabled`만 보고 결정하므로 게이트도 같은 조건이어야 한다(:385-386 주석). 또 **이 메시지의 버튼이 아니라 "아무 칸이라도 켜졌는가"로 판정한다**(:387-389 주석) — worker가 두 버튼을 교대로 쏘므로 어느 칸이든 켜져 있으면 우리 클릭이 L로도 R로도 P2에 떨어질 수 있다. 범위를 "우리 칸 켜짐 · ON · 우리 창 위"로 최대한 좁혀 뒀으므로 다른 앱의 주입 클릭은 어디서든 그대로 통과한다.
+**마우스 훅도 같은 구조인데 예외가 하나 있다.** 주입 클릭은 기본적으로 그대로 통과하지만(autokey_e.cpp:1359-1367), `ShouldSwallowInjectedClick`(:438-440)이 참이면 삼킨다 — 조건은 **ON + L/R 중 하나라도 켜짐(`AnyMouseSelected`, :396-401) + 커서가 P2 위**다. 이게 없으면 worker가 커서 자리에 쏘는 클릭이 자기 창에 떨어져 R 칸이 켜져 있으면 다음 사이클에 앱이 종료되고, L 칸이면 사이클마다 셀이 토글되며 ini까지 다시 쓰인다(2026-10-28 에러 로그). 이 게이트는 **의도적으로 `g_lolForeground`를 보지 않는다** — worker는 발사 여부를 `isEnabled`만 보고 결정하므로 게이트도 같은 조건이어야 한다(:431-432 주석). 또 **이 메시지의 버튼이 아니라 "아무 칸이라도 켜졌는가"로 판정한다**(:433-435 주석) — worker가 두 버튼을 교대로 쏘므로 어느 칸이든 켜져 있으면 우리 클릭이 L로도 R로도 P2에 떨어질 수 있다. 범위를 "우리 칸 켜짐 · ON · 우리 창 위"로 최대한 좁혀 뒀으므로 다른 앱의 주입 클릭은 어디서든 그대로 통과한다.
 
-★ 연동 모드도 이 구조 위에 그대로 얹혀 있다 — **hook은 전혀 손대지 않았다.** 물리적으로 누른 키 하나만 hook이 삼키고, 같은 사이클에 나가는 나머지 선택 키들은 injected 입력이라 위 체크로 통과한다(autokey_e.cpp:1384-1405). 마우스 홀드가 연동의 트리거가 되는 것도 worker 쪽 `MouseActive()` 한 줄이며(:1388) 훅에는 아무 조건도 추가되지 않았다. 연동 모드를 고칠 때 hook 쪽에 조건을 추가하려는 충동이 들면 이 설계를 먼저 볼 것.
+★ 연동 모드와 3상태 칸도 이 구조 위에 그대로 얹혀 있다 — **키보드 훅에서 바뀐 것은 판정 한 식뿐이다**: `key.selected` → `key.mode != CELL_OFF`(autokey_e.cpp:1319). 마우스 훅도 같은 모양으로 한 식이다(`m.mode != CELL_OFF`를 `ShouldBlockMouseDown`에 넘긴다, :1374). 물리적으로 누른 키 하나만 hook이 삼키고, 같은 사이클에 나가는 나머지 CHAIN 키들은 injected 입력이라 위 체크로 통과한다(정책은 `PlanCycle`:496-511, 전송은 :1525-1537). 마우스 홀드가 연동의 트리거가 되는 것도 **worker 쪽 스냅샷 한 줄**(`PlanCycle`의 :500-502)이며 훅에는 아무 조건도 추가되지 않았다. 즉 SOLO/CHAIN 구분은 **전부 worker 쪽 정책**이고 훅은 "켜졌나"만 본다 — 연동이나 모드를 고칠 때 hook 쪽에 조건을 추가하려는 충동이 들면 이 설계를 먼저 볼 것.
 
 ### 원본 키 차단과 전역 소비 범위
-hook이 `return 1`을 반환하면 원본 입력이 시스템으로 전달되지 않는다 (F2: autokey_e.cpp:**1168** / F3: **1173** / 선택 키 up: **1189** / down: **1198** / 마우스 down: **1254** / 마우스 up: **1263**). 1167·1172는 `PostMessage(WM_APP+1)` 줄이므로 혼동하지 말 것.
+hook이 `return 1`을 반환하면 원본 입력이 시스템으로 전달되지 않는다 (F2: autokey_e.cpp:**1292** / F3: **1297** / 켜진 키 up: **1313** / down: **1322** / 마우스 down: **1378** / 마우스 up: **1387**). 1291·1296은 `PostMessage(WM_APP+1)` 줄이므로 혼동하지 말 것.
 
-**F2/F3 분기(autokey_e.cpp:1163-1175)에는 isEnabled 게이트도 LoL 포그라운드 게이트도 없고**, 훅은 전역 설치(autokey_e.cpp:865, `dwThreadId=0`)다. 따라서 앱이 OFF이고 LoL이 아닌 창을 쓰고 있어도 프로세스가 떠 있는 동안 F2/F3는 어떤 앱에도 도달하지 않는다 — 탐색기 이름 바꾸기(F2), 브라우저·에디터 찾기(F3), Excel 셀 편집(F2)이 전부 무반응이 되고 해제 방법은 앱 종료뿐이다. 선택 키는 isEnabled 게이트는 있지만(down:1195 / up:1181-1190) 포그라운드 게이트가 없어, F2로 수동 ON한 뒤에는 다음 포그라운드 변경이 자동 OFF시킬 때까지 비-LoL 앱에서도 그 키가 삼켜진다.
+**F2/F3 분기(autokey_e.cpp:1287-1299)에는 isEnabled 게이트도 LoL 포그라운드 게이트도 없고**, 훅은 전역 설치(autokey_e.cpp:989, `dwThreadId=0`)다. 따라서 앱이 OFF이고 LoL이 아닌 창을 쓰고 있어도 프로세스가 떠 있는 동안 F2/F3는 어떤 앱에도 도달하지 않는다 — 탐색기 이름 바꾸기(F2), 브라우저·에디터 찾기(F3), Excel 셀 편집(F2)이 전부 무반응이 되고 해제 방법은 앱 종료뿐이다. 켜진 키는 isEnabled 게이트는 있지만(down:1319 / up:1305-1316) 포그라운드 게이트가 없어, F2로 수동 ON한 뒤에는 다음 포그라운드 변경이 자동 OFF시킬 때까지 비-LoL 앱에서도 그 키가 삼켜진다. **차단 판정은 `mode != CELL_OFF`이므로 SOLO든 CHAIN이든 삼키는 범위가 똑같다** — ★가 꺼져 있어서 CHAIN 칸이 SOLO처럼 동작하는 중에도 그 키는 여전히 삼켜진다.
 
-**이 범위는 키가 13개로 늘면서 그만큼 넓어졌다.** 1~7을 켜 두면 비-LoL 앱에서도 숫자 입력이 사라질 수 있고, **2026-10-30에 추가된 `D`/`F`는 평범한 글자 키라 그 피해가 숫자보다 눈에 잘 띈다**(기본은 꺼짐). "메모장에 숫자·글자가 안 찍힌다" 같은 신고가 오면 선택 상태(ini `[Keys]`)와 ON/OFF를 먼저 확인할 것. 핫키를 바꾸거나 게이트를 추가할 때도 이 범위를 먼저 볼 것.
+**이 범위는 키가 13개로 늘면서 그만큼 넓어졌다.** 1~7을 켜 두면 비-LoL 앱에서도 숫자 입력이 사라질 수 있고, **2026-10-30에 추가된 `D`/`F`는 평범한 글자 키라 그 피해가 숫자보다 눈에 잘 띈다**(기본은 꺼짐). "메모장에 숫자·글자가 안 찍힌다" 같은 신고가 오면 칸 상태(ini `[Keys]`의 0/1/2)와 ON/OFF를 먼저 확인할 것. 핫키를 바꾸거나 게이트를 추가할 때도 이 범위를 먼저 볼 것.
 
-**마우스는 키와 게이트가 다르다 — 의도적이다.** `ShouldBlockMouseDown`(autokey_e.cpp:371-378)은 네 조건을 모두 요구한다: `isEnabled` · **`g_lolForeground`** · **그 버튼의 칸이 켜짐**(버튼별 `selected`를 넘긴다, :1250-1251) · 커서가 P2 위가 **아님**. 즉 키와 달리 **LoL이 포그라운드가 아니면 클릭은 절대 삼켜지지 않는다.** 전역으로 삼켜진 좌클릭은 사용자가 창을 바꿔 탈출할 수단까지 빼앗으므로(선택 키와는 위험도가 다르다) 포그라운드 게이트를 마우스에만 달았다(:257-262 주석). 그 대가로 **LoL 밖에서 F2로 수동 ON하면 키는 반복되지만 클릭은 반복되지 않는다** — 버그가 아니라 이 게이트의 결과다.
-- 세 번째 조건이 **버튼별**이라는 점이 2026-10-30 변경의 핵심이다: L만 켜 두면 우클릭은 어디서도 삼켜지지 않는다(그 반대도 같다). 키 칸과 완전히 같은 게이트 모양이다(:363-365 주석).
-- 네 번째 조건의 "자기 창 위" 예외는 P2 자체의 조작(우클릭 종료 · 셀/슬라이더 클릭)을 지키기 위한 것이다. 마우스 훅은 창 활성화보다 먼저 발화하므로, 이 예외 없이는 LoL이 포그라운드인 상태에서 P2를 클릭할 방법이 없다(:366-369 주석).
-- keyup 대칭도 키와 같다: **우리가 삼킨 down의 up만 삼킨다.** 단 마우스는 그 플래그를 **버튼별 항목에** 둔다(`g_mouse[].weBlockedDown`, autokey_e.cpp:224, :1253 저장 / :1261-1264 소비) — 우클릭을 홀드한 채 좌클릭을 하면 공유 플래그로는 엉뚱한 버튼의 up이 삼켜져 대상 앱에 버튼이 눌린 채로 남기 때문이다. 플래그가 항목 안에 있으니 두 버튼의 경로가 애초에 서로를 건드리지 않는다.
-- `g_lolForeground`는 포그라운드가 바뀔 때마다 `WinEventProc`가 갱신하고(:1519) 시작 시 `WinMain`이 시드한다(:888). **`isEnabled`가 바뀔 때만 갱신하도록 바꾸면 게이트가 낡은 값으로 고정된다**(F2/F3 수동 토글은 포그라운드를 바꾸지 않으므로).
+**마우스는 키와 게이트가 다르다 — 의도적이다.** `ShouldBlockMouseDown`(autokey_e.cpp:417-424)은 네 조건을 모두 요구한다: `isEnabled` · **`g_lolForeground`** · **그 버튼의 칸이 켜짐**(버튼별 `m.mode != CELL_OFF`를 넘긴다, :1374-1375) · 커서가 P2 위가 **아님**. 즉 키와 달리 **LoL이 포그라운드가 아니면 클릭은 절대 삼켜지지 않는다.** 전역으로 삼켜진 좌클릭은 사용자가 창을 바꿔 탈출할 수단까지 빼앗으므로(켜진 키와는 위험도가 다르다) 포그라운드 게이트를 마우스에만 달았다(:278-283 주석). 그 대가로 **LoL 밖에서 F2로 수동 ON하면 키는 반복되지만 클릭은 반복되지 않는다** — 버그가 아니라 이 게이트의 결과다.
+- 세 번째 조건이 **버튼별**이라는 점이 2026-10-30 변경의 핵심이다: L만 켜 두면 우클릭은 어디서도 삼켜지지 않는다(그 반대도 같다). 키 칸과 완전히 같은 게이트 모양이고, 3상태가 된 뒤에도 **SOLO/CHAIN을 구분하지 않는다**(:410-411 주석).
+- 네 번째 조건의 "자기 창 위" 예외는 P2 자체의 조작(우클릭 종료 · 셀/슬라이더 클릭)을 지키기 위한 것이다. 마우스 훅은 창 활성화보다 먼저 발화하므로, 이 예외 없이는 LoL이 포그라운드인 상태에서 P2를 클릭할 방법이 없다(:412-415 주석).
+- keyup 대칭도 키와 같다: **우리가 삼킨 down의 up만 삼킨다.** 단 마우스는 그 플래그를 **버튼별 항목에** 둔다(`g_mouse[].weBlockedDown`, autokey_e.cpp:245, :1377 저장 / :1385-1388 소비) — 우클릭을 홀드한 채 좌클릭을 하면 공유 플래그로는 엉뚱한 버튼의 up이 삼켜져 대상 앱에 버튼이 눌린 채로 남기 때문이다. 플래그가 항목 안에 있으니 두 버튼의 경로가 애초에 서로를 건드리지 않는다.
+- `g_lolForeground`는 포그라운드가 바뀔 때마다 `WinEventProc`가 갱신하고(:1632) 시작 시 `WinMain`이 시드한다(:1012). **`isEnabled`가 바뀔 때만 갱신하도록 바꾸면 게이트가 낡은 값으로 고정된다**(F2/F3 수동 토글은 포그라운드를 바꾸지 않으므로).
 
 ### 시작 시 초기 상태 시드
-`SetWinEventHook`은 포그라운드 **변경** 이벤트만 구독하므로 이미 LoL이 떠 있는 상태로 실행하면 훅이 발화하지 않는다. 이 공백을 autokey_e.cpp:885-891의 시작 시 `GetForegroundWindow()` 1회 검사가 메운다. 이 검사를 지우면 "실행 후 alt-tab을 한 번 해야 켜지는" 회귀가 생기며, 포커스 전환 위주의 수동 검증으로는 잡히지 않는다.
+`SetWinEventHook`은 포그라운드 **변경** 이벤트만 구독하므로 이미 LoL이 떠 있는 상태로 실행하면 훅이 발화하지 않는다. 이 공백을 autokey_e.cpp:1010-1015의 시작 시 `GetForegroundWindow()` 1회 검사가 메운다. 이 검사를 지우면 "실행 후 alt-tab을 한 번 해야 켜지는" 회귀가 생기며, 포커스 전환 위주의 수동 검증으로는 잡히지 않는다.
 
-**시드 대상이 2026-10-28에 둘로 늘었다**: `isEnabled`(:890)와 마우스 훅의 포그라운드 게이트 `g_lolForeground`(:888)다. 같은 1회 검사 결과를 두 전역에 넣으므로 둘이 어긋날 수 없다 — 한쪽만 시드하면 "LoL을 띄워 둔 채 실행했는데 키는 반복되고 클릭만 안 된다"가 된다.
+**시드 대상이 2026-10-28에 둘로 늘었다**: `isEnabled`(:1014)와 마우스 훅의 포그라운드 게이트 `g_lolForeground`(:1012)다. 같은 1회 검사 결과를 두 전역에 넣으므로 둘이 어긋날 수 없다 — 한쪽만 시드하면 "LoL을 띄워 둔 채 실행했는데 키는 반복되고 클릭만 안 된다"가 된다.
 
-`UpdateUI()` 직접 호출 지점은 초기화 경로(autokey_e.cpp:893) · `WM_APP+1` 핸들러(autokey_e.cpp:985) · 토글 클릭(:1094) · 슬라이더 값 변경(`SetIntervalFromX`:600, `NudgeInterval`:610)이다. 앞의 둘만 `isEnabled`를 반영하므로, **`isEnabled`를 바꾸는 코드를 새로 추가할 때는 `PostMessage(hMainWnd, WM_APP + 1, 0, 0)`을 반드시 함께 넣어야** UI가 따라간다(hook 콜백에서 `UpdateUI()`를 직접 부르는 것은 재진입 금지 대상이다).
+`UpdateUI()` 직접 호출 지점은 초기화 경로(autokey_e.cpp:1017) · `WM_APP+1` 핸들러(autokey_e.cpp:1109) · 토글 클릭(:1218) · 슬라이더 값 변경(`SetIntervalFromX`:708, `NudgeInterval`:718)이다. 앞의 둘만 `isEnabled`를 반영하므로, **`isEnabled`를 바꾸는 코드를 새로 추가할 때는 `PostMessage(hMainWnd, WM_APP + 1, 0, 0)`을 반드시 함께 넣어야** UI가 따라간다(hook 콜백에서 `UpdateUI()`를 직접 부르는 것은 재진입 금지 대상이다).
 
-`UpdateUI`에는 상태 변화 가드가 있다(`static unsigned lastBits` / `static int lastInterval`, autokey_e.cpp:1278-1279, 초기값은 둘 다 불가능한 값이라 첫 그리기는 항상 실행된다). 전체 다시 그리기 1회가 실측 ~126us(최대 ~1.2ms)이고 그 시간만큼 훅을 서비스하는 메인 스레드를 점유하므로, 표시가 실제로 바뀔 때만 그린다. 현재 가드는 두 값이다:
-- `lastBits` = **총 17비트** — `isEnabled` 1비트(bit 0) + 키 선택 13비트(bit 1~13) + 연동 모드 1비트(bit 14) + **마우스 2비트**(bit 15~16, 이제 3상태 인코딩이 아니라 **버튼당 1비트**다)(autokey_e.cpp:1281-1289)
+`UpdateUI`에는 상태 변화 가드가 있다(`static unsigned long long lastBits`, autokey_e.cpp:1403 / `static int lastInterval`, :1404, 초기값은 둘 다 불가능한 값이라 첫 그리기는 항상 실행된다). 전체 다시 그리기 1회가 실측 ~126us(최대 ~1.2ms)이고 그 시간만큼 훅을 서비스하는 메인 스레드를 점유하므로, 표시가 실제로 바뀔 때만 그린다. 현재 가드는 두 값이다:
+- `lastBits` = **총 32비트** — `isEnabled` 1비트(bit 0) + **키 13칸 x 2비트**(bit 1~26) + 연동 모드 1비트(bit 27) + **마우스 2칸 x 2비트**(bit 28~31)(autokey_e.cpp:1409-1417). 2026-11-01에 칸당 1비트에서 2비트로 올렸다 — **OFF/SOLO/CHAIN이 다르게 보이므로 1비트로는 CHAIN 전환이 가드에 삼켜진다**(테두리만 바뀌는 변화라 눈에 더 안 띈다). 타입도 `unsigned`에서 `unsigned long long`으로 바꿨다
 - `lastInterval` = 슬라이더 ms 값
 
-둘 다 같으면 그리지 않고, **interval만 바뀌었으면 슬라이더 RECT만 무효화한다**(autokey_e.cpp:1299-1307). 드래그 중에는 거의 매 `WM_MOUSEMOVE`마다 여기로 들어오는데, 전체 클라이언트를 지우고 다시 그리면 창이 번쩍였고 `DrawSlider`가 트랙 전체를 직접 칠하므로 erase도 필요 없다.
+둘 다 같으면 그리지 않고, **interval만 바뀌었으면 슬라이더 RECT만 무효화한다**(autokey_e.cpp:1427-1435). 드래그 중에는 거의 매 `WM_MOUSEMOVE`마다 여기로 들어오는데, 전체 클라이언트를 지우고 다시 그리면 창이 번쩍였고 `DrawSlider`가 트랙 전체를 직접 칠하므로 erase도 필요 없다.
 
-**창에 새 표시를 추가하면 이 가드가 그 변화를 삼키므로 반드시 가드 값에 포함시킬 것** (L/R 칸이 그 사례다 — 버튼마다 1비트를 얹었고, 3상태 `M`이던 시절의 2비트와 개수만 우연히 같다). 비트를 더 쓰려면 `static_assert(1 + KEY_COUNT + 1 + 2 <= 32)`(autokey_e.cpp:108)가 지키는 폭도 함께 볼 것: 가드는 `1 + KEY_COUNT + 1 + 2`비트를 쓰므로 `KEY_COUNT`가 29면 unsigned 32비트를 넘는다(현재 13 → 17비트).
+**창에 새 표시를 추가하면 이 가드가 그 변화를 삼키므로 반드시 가드 값에 포함시킬 것** (3상태 칸이 그 사례다 — 칸마다 2비트로 넓혔다. 그 전에는 L/R 칸이 사례였고 버튼마다 1비트였다). 비트를 더 쓰려면 `static_assert(1 + 2 * KEY_COUNT + 1 + 2 * MOUSE_COUNT <= 64)`(autokey_e.cpp:173)가 지키는 폭도 함께 볼 것: 가드는 `1 + 2*KEY_COUNT + 1 + 2*MOUSE_COUNT`비트를 쓰므로 `KEY_COUNT`가 **30이면** 64비트를 넘는다(29면 정확히 64로 들어맞는다. 현재 13 → 32비트).
 
 ### 종료 순서 (훅 해제가 조인 앞이다 — 2026-10-28 변경)
-종료 경로는 메시지 루프 종료(autokey_e.cpp:898-901) → `g_exitThread = true` + `ClearPressedKeys()`(:904-905) → **훅 3개 해제**(키보드 :915-918 / 마우스 :920-923 / WinEvent :925-928) → worker 조인(:931-935, 상한 1000ms) 순이다.
+종료 경로는 메시지 루프 종료(autokey_e.cpp:1022-1025) → `g_exitThread = true` + `ClearPressedKeys()`(:1028-1029) → **훅 3개 해제**(키보드 :1039-1042 / 마우스 :1044-1047 / WinEvent :1049-1052) → worker 조인(:1055-1059, 상한 1000ms) 순이다.
 
 **순서를 바꾼 이유**: LL 훅 콜백은 설치 스레드의 메시지 펌프로 배달되므로, 메시지 루프가 끝난 뒤에도 훅이 걸려 있는 구간은 **훅이 살아 있는데 아무도 서비스하지 않는** 상태가 된다. 그 구간에서는 키 입력·클릭마다 `LowLevelHooksTimeout`(기본 ~300ms)을 기다린 뒤에야 무시되고 그동안 시스템 전체 입력이 지연된다. 예전 순서(조인 → 해제)에서는 그 구간이 최대 1000ms였고, 훅이 마우스까지 2개로 늘면서 지연 대상도 키보드에서 포인터 전체로 넓어졌다. 지금은 루프 종료 직후 바로 해제하므로 이 무서비스 구간이 사실상 사라졌다.
 
-**이 순서를 다시 뒤집지 말 것 — 훅 해제를 조인 뒤로 옮기지 말 것.** 먼저 떼도 안전한 근거는 두 LL 콜백이 플래그만 만지고 worker는 플래그를 읽어 입력을 보내기만 한다는 것이다. worker는 훅을 전혀 필요로 하지 않으므로 마지막 사이클을 끝내는 중에 훅이 사라져도 문제가 없다(autokey_e.cpp:907-914 주석이 같은 근거를 적어 뒀다). 반대로 종료 경로에 새 대기·정리 작업을 넣을 때는 그것이 **훅 해제보다 뒤**인지 확인할 것 — 앞에 넣으면 그 시간이 그대로 전역 입력 지연이 된다.
+**이 순서를 다시 뒤집지 말 것 — 훅 해제를 조인 뒤로 옮기지 말 것.** 먼저 떼도 안전한 근거는 두 LL 콜백이 플래그만 만지고 worker는 플래그를 읽어 입력을 보내기만 한다는 것이다. worker는 훅을 전혀 필요로 하지 않으므로 마지막 사이클을 끝내는 중에 훅이 사라져도 문제가 없다(autokey_e.cpp:1031-1038 주석이 같은 근거를 적어 뒀다). 반대로 종료 경로에 새 대기·정리 작업을 넣을 때는 그것이 **훅 해제보다 뒤**인지 확인할 것 — 앞에 넣으면 그 시간이 그대로 전역 입력 지연이 된다.
 
-`WM_DESTROY`는 그보다 먼저 `CommitSettings`(autokey_e.cpp:1115)로 아직 안 쓴 디바운스 값을 기록한다. 이 호출은 메시지 루프가 끝나기 **전**이고 훅도 아직 서비스되는 구간이지만, **ini 쓰기 한 번이 수 ms**이므로 종료 경로에 파일 I/O를 더 얹지 말 것.
+`WM_DESTROY`는 그보다 먼저 `CommitSettings`(autokey_e.cpp:1239)로 아직 안 쓴 디바운스 값을 기록한다. 이 호출은 메시지 루프가 끝나기 **전**이고 훅도 아직 서비스되는 구간이지만, **ini 쓰기 한 번이 수 ms**이므로 종료 경로에 파일 I/O를 더 얹지 말 것.
 
-**worker 수명 > GDI 수명**: `WM_DESTROY`가 브러시·폰트를 해제한 뒤(autokey_e.cpp:1118-1139)에야 `PostQuitMessage`(:1141)가 루프를 끝내므로 worker는 GDI 객체 파괴 이후까지 살아 있다. 지금 안전한 이유는 `SendKey`(:1314-1320)도 `SendMouseClick`(:1326-1330)도 GDI/HWND를 전혀 만지지 않기 때문뿐이다(`SendMouseClick`은 좌표도 쓰지 않고 `g_mouse[].downFlag`/`upFlag`의 `MOUSEEVENTF_*`만 보낸다). "worker는 UI/GDI를 만지지 않는다"는 취향이 아니라 수명 불변식이며, 마우스 모드를 넣고 L/R로 쪼개면서도 깨지 않았다 — worker가 읽는 것은 `g_intervalMs`와 `g_mouse[]`의 플래그·`MOUSEEVENTF` 상수 같은 **정수뿐**이다.
+**worker 수명 > GDI 수명**: `WM_DESTROY`가 브러시·폰트를 해제한 뒤(autokey_e.cpp:1242-1263)에야 `PostQuitMessage`(:1265)가 루프를 끝내므로 worker는 GDI 객체 파괴 이후까지 살아 있다. 지금 안전한 이유는 `SendKey`(:1442-1448)도 `SendMouseClick`(:1454-1458)도 GDI/HWND를 전혀 만지지 않기 때문뿐이다(`SendMouseClick`은 좌표도 쓰지 않고 `g_mouse[].downFlag`/`upFlag`의 `MOUSEEVENTF_*`만 보낸다). "worker는 UI/GDI를 만지지 않는다"는 취향이 아니라 수명 불변식이며, 마우스 모드를 넣고 L/R로 쪼개고 칸을 3상태로 만들면서도 깨지 않았다 — worker가 읽는 것은 `g_intervalMs`와 `g_keys[]`/`g_mouse[]`의 `mode`·`pressed`·`MOUSEEVENTF` 상수 같은 **정수뿐**이고, 그것도 사이클 머리의 스냅샷 한 번으로 끝난다(:1511-1520).
 
-반면 **`LowLevelMouseProc`는 `hMainWnd`를 만진다**(`GetWindowRect`, autokey_e.cpp:1230). 창이 파괴된 뒤에도 `hMainWnd`는 NULL로 지워지지 않으므로, 그 짧은 구간(WM_DESTROY ~ 훅 해제)에서는 `GetWindowRect`가 실패해 `overOwn = false`로 떨어지는 동작에 의존한다. 이 판정에 창 상태를 더 쓰려면 이 수명 구간을 먼저 볼 것.
+반면 **`LowLevelMouseProc`는 `hMainWnd`를 만진다**(`GetWindowRect`, autokey_e.cpp:1354). 창이 파괴된 뒤에도 `hMainWnd`는 NULL로 지워지지 않으므로, 그 짧은 구간(WM_DESTROY ~ 훅 해제)에서는 `GetWindowRect`가 실패해 `overOwn = false`로 떨어지는 동작에 의존한다. 이 판정에 창 상태를 더 쓰려면 이 수명 구간을 먼저 볼 것.
 
 ### 타이밍 (실측)
 - **`timeBeginPeriod` 사용 금지** — LoL 인게임 프레임 렉 유발(에러 로그 2026-04-08). winmm 링크도 하지 않는다.
-- **대기 단위는 여전히 `Sleep(1)` 호출 횟수(tick)다**(autokey_e.cpp:1434-1438). `timeBeginPeriod` 미적용 시 타이머 tick은 ~15.5ms이고, 이 루프처럼 `Sleep(1)`을 **연속 호출**하면 직전 반환이 tick 경계에 정렬되어 매 호출이 꼬박 1 tick을 소모한다. 따라서 **실제 주기 ≈ tick 수 x 15.5ms**이며, 주기는 연속값이 아니라 ~15.5ms 격자 위에서만 실현된다.
-- 사용자가 만지는 값은 ms다: `g_intervalMs`(autokey_e.cpp:254, **35~200, 5ms 단위, 기본 150** — `DEFAULT_INTERVAL_MS` :149, 2026-10-30에 100에서 올렸다)를 슬라이더가 쓰고 worker가 읽는다. 과거의 `E_KEY_INTERVAL` 상수는 **제거됐다** — tick 환산은 `IntervalToTicks`(autokey_e.cpp:731-739)가 한다.
-- **값 격자는 5ms다**(`INTERVAL_STEP_MS`, autokey_e.cpp:148). 양 끝(`MIN_INTERVAL_MS = 35` :146, `MAX_INTERVAL_MS = 200` :147)이 둘 다 5의 배수라 **스냅에 끝단 특례가 없다** — 클릭·드래그·휠·ini 로드가 모두 같은 `SnapInterval`(:556-562)을 통과하므로 어느 경로로 들어와도 값 집합은 정확히 35,40,...,200이다. 하한을 35로 올린 것이 이 특례 제거의 대가다(이전 하한 31은 5의 배수가 아니었다).
-- **`IntervalToTicks`의 3단계** (`TICK_MS = 15.5` :144, `MIN_TICKS = 2` :145, `JITTER_MS = 6` :150):
+- **대기 단위는 여전히 `Sleep(1)` 호출 횟수(tick)다**(autokey_e.cpp:1547-1551). `timeBeginPeriod` 미적용 시 타이머 tick은 ~15.5ms이고, 이 루프처럼 `Sleep(1)`을 **연속 호출**하면 직전 반환이 tick 경계에 정렬되어 매 호출이 꼬박 1 tick을 소모한다. 따라서 **실제 주기 ≈ tick 수 x 15.5ms**이며, 주기는 연속값이 아니라 ~15.5ms 격자 위에서만 실현된다.
+- 사용자가 만지는 값은 ms다: `g_intervalMs`(autokey_e.cpp:275, **35~200, 5ms 단위, 기본 150** — `DEFAULT_INTERVAL_MS` :148, 2026-10-30에 100에서 올렸다)를 슬라이더가 쓰고 worker가 읽는다. 과거의 `E_KEY_INTERVAL` 상수는 **제거됐다** — tick 환산은 `IntervalToTicks`(autokey_e.cpp:855-863)가 한다.
+- **값 격자는 5ms다**(`INTERVAL_STEP_MS`, autokey_e.cpp:147). 양 끝(`MIN_INTERVAL_MS = 35` :145, `MAX_INTERVAL_MS = 200` :146)이 둘 다 5의 배수라 **스냅에 끝단 특례가 없다** — 클릭·드래그·휠·ini 로드가 모두 같은 `SnapInterval`(:664-670)을 통과하므로 어느 경로로 들어와도 값 집합은 정확히 35,40,...,200이다. 하한을 35로 올린 것이 이 특례 제거의 대가다(이전 하한 31은 5의 배수가 아니었다).
+- **`IntervalToTicks`의 3단계** (`TICK_MS = 15.5` :143, `MIN_TICKS = 2` :144, `JITTER_MS = 6` :149):
   1. 목표 ms에 `±JITTER_MS` 균등 난수를 더하고 35~200으로 클램프
   2. `목표 / TICK_MS`를 **확률적 반올림(디더링)** — 소수부 확률로 위/아래 tick을 고른다. 격자가 거친데도 **평균 주기가 설정값과 일치하는** 이유가 이것이다
   3. `MIN_TICKS`(2) 미만으로는 내려가지 않는다
 - **`MIN_TICKS` 가드는 현 상수에서 도달 불가다** — 하한 35ms는 2.258 tick이고 1단계 클램프가 목표를 35 미만으로 내려보내지 않으므로, `(int)(target / TICK_MS + rndDither)`의 최솟값이 2다(슬라이더 전 구간 x 지터·디더 전수에서 발동 0회). **그래도 지우지 말 것**: 이것은 "0 tick이면 무한 연타"를 막는 방어선이고, `MIN_INTERVAL_MS`를 **31 미만으로** 내리는 순간 비로소 발동한다(31은 정확히 2.0 tick이라 여전히 안 걸리고, 30은 1.935 tick이라 디더링이 1 tick을 뽑는다). 즉 하한 상수와 이 가드는 한 쌍이며, 하한을 건드릴 때 같이 봐야 한다
-- **양 끝은 평균이 안쪽으로 밀린다**: 1단계 클램프가 한쪽만 걸리므로 35 설정은 평균 ~36.5ms, 200 설정은 평균 ~198.5ms가 된다(디더링 하니스 10만회 실측; 끝에서 떨어진 기본값 150은 150.01ms로 일치, 소스 주석 :728-729). 사용자가 요청한 하한보다 빨라지지 않게 하는 쪽을 택한 의도적 결과다. 35ms는 ~2.26 tick이므로 디더링이 2 tick과 3 tick을 섞어 그 평균을 만든다.
+- **양 끝은 평균이 안쪽으로 밀린다**: 1단계 클램프가 한쪽만 걸리므로 35 설정은 평균 ~36.5ms, 200 설정은 평균 ~198.5ms가 된다(디더링 하니스 10만회 실측; 끝에서 떨어진 기본값 150은 150.01ms로 일치, 소스 주석 :848-853). 사용자가 요청한 하한보다 빨라지지 않게 하는 쪽을 택한 의도적 결과다. 35ms는 ~2.26 tick이므로 디더링이 2 tick과 3 tick을 섞어 그 평균을 만든다.
 - **wake 불변식 (속도 조절의 핵심)**: worker 스레드가 깨어나는 횟수는 설정 주기와 **무관하게 항상 ~64.7회/초로 고정**이다. 주기는 "몇 번 깨어날 때마다 키를 쏘느냐"만 정한다. 즉 값을 낮춰도 스케줄러 부하는 전혀 늘지 않고 주입 이벤트 수만 는다 — 2026-04-08 렉 기전(글로벌 타이머 틱 상승)과 인과 경로가 겹치지 않는 이유가 이것이다. idle 상태(`Sleep(2)`)의 wake도 동일한 ~64회/초다.
 - tick 수 대비 실측값(앱 구조 충실 복제 하니스 = 메인 스레드 자체 WH_KEYBOARD_LL + 메시지 펌프 + worker 실주입, 8초씩, 2026-08-03): 10 tick → 154.6ms(6.47회/초), 5 → 77.3ms(12.94), 3 → 46.4ms(21.56), **2 → 30.9ms(32.37회/초)**, 1 → 15.5ms(64.40회/초). 전 구간 wake 64.4~64.7회/초. 완전한 선형. 슬라이더 범위 35~200ms는 이 격자에서 **2~13 tick**에 대응하고, 하한 35ms는 2 tick(30.9ms)과 3 tick(46.4ms) 사이에 있어 디더링으로만 평균이 맞는다.
 - **속도 상한**: 1 tick의 ~64회/초가 이 Sleep 기반 구조의 물리적 한계이고, 슬라이더 하한을 35ms(~2.26 tick)로 둔 것은 그 한계 직전에서 멈추기 위한 선택이다. 0 tick은 대기 루프를 통째로 없애 `SendKey()`/`SendMouseClick()`이 무한 연타되므로 **금지** — `MIN_TICKS` 가드를 없애지 말 것.
-- **★ 연동 모드는 주기를 바꾸지 않고 사이클당 주입 횟수를 늘린다**(autokey_e.cpp:1384-1405). 선택 키 3개면 같은 주기에 3개가 연속으로 나가고, L/R 중 하나라도 켜져 있으면 그 burst 끝에 클릭 1회가 더 붙는다(:1398-1404). 즉 게임 입력 파이프라인 부하는 "주기"가 아니라 **(선택 키 수 + 클릭 1) x 1/주기**이며, 현재 상한은 **13 + 1 = 14회/주기**다.
-- **마우스 클릭은 키와 같은 주기·같은 대기 루프를 쓴다.** 비연동 모드에서는 버튼을 홀드한 동안 사이클마다 1회(autokey_e.cpp:1416-1423), 연동 모드에서는 burst의 마지막에 1회다. 클릭용 별도 타이머는 없다 — 넣으면 wake 불변식이 깨진다.
-- **클릭은 사이클당 최대 1회이므로 L/R을 둘 다 켜도 주입 수는 늘지 않는다.** 두 버튼이 동시에 후보일 때 worker는 `PickMouseClick`(:402-411)으로 L R L R 교대만 하고, 그 커서(`nextMouse`)는 worker 스택 로컬이다(:1379). 후보가 하나뿐인 사이클은 그 하나를 쏘고 커서를 건드리지 않으므로, 두 번째 버튼을 나중에 켜면 교대가 처음부터 다시 시작되지 않고 이어진다. 즉 **클릭 비율은 버튼 수와 무관하게 1/주기로 고정**이고, L/R 각각이 보는 실효 주기는 둘 다 후보일 때 2배가 된다 — 비연동 모드에서 두 칸을 켜고 **두 버튼을 함께 홀드하면 각 버튼은 설정 주기의 절반 속도로 나간다**(사이클당 1회 상한의 직접적 결과이며, 키의 "병렬(분할 아님)" 정책과 반대 방향이다). 연동 모드에서는 홀드 없이도 두 칸이 후보가 되므로 같은 절반 속도가 적용된다.
+- **★ 연동 모드는 주기를 바꾸지 않고 사이클당 주입 횟수를 늘린다**(`PlanCycle`:496-511 → 전송 :1525-1537). **늘어나는 양은 홀드한 키 수가 아니라 `CELL_CHAIN` 칸의 수에 비례한다** — CHAIN 키가 3개면 그중 하나만 눌러도 같은 주기에 3개가 연속으로 나가고, CHAIN 마우스 칸이 있으면 그 burst 끝에 클릭 1회가 더 붙는다(:509-510). 여기에 **따로 홀드한 SOLO 키**가 그 사이클에 더해질 수 있다(:505). 즉 게임 입력 파이프라인 부하는 "주기"가 아니라 **(CHAIN 키 수 + 홀드한 SOLO 키 수 + 클릭 1) x 1/주기**이며, 어느 조합에서도 키는 13개를 넘을 수 없으므로 현재 상한은 **13 + 1 = 14회/주기**로 그대로다.
+- **마우스 클릭은 키와 같은 주기·같은 대기 루프를 쓴다.** 어느 모드에서든 그 사이클이 보내는 모든 키 뒤에 클릭 1회가 붙는다(autokey_e.cpp:1525-1537 — 키 루프가 먼저, 클릭이 마지막). 클릭용 별도 타이머는 없다 — 넣으면 wake 불변식이 깨진다.
+- **클릭은 사이클당 최대 1회이므로 L/R을 둘 다 켜도 주입 수는 늘지 않는다.** 두 버튼이 동시에 후보일 때 worker는 `PickMouseClick`(:449-458)으로 **R L R L** 교대만 하고, 그 커서(`nextMouse`)는 worker 스택 로컬이며 초기값이 `MOUSE_RIGHT`다(:1505). 후보가 하나뿐인 사이클은 그 하나를 쏘고 커서를 건드리지 않으므로, 두 번째 버튼을 나중에 켜면 교대가 처음부터 다시 시작되지 않고 이어진다. 즉 **클릭 비율은 버튼 수와 무관하게 1/주기로 고정**이고, L/R 각각이 보는 실효 주기는 둘 다 후보일 때 2배가 된다 — 두 칸을 켜고 **두 버튼을 함께 홀드하면 각 버튼은 설정 주기의 절반 속도로 나간다**(사이클당 1회 상한의 직접적 결과이며, 키의 "병렬(분할 아님)" 정책과 반대 방향이다). ★를 켜고 두 칸을 다 CHAIN으로 두면 **홀드 없이도** 둘이 후보가 되므로 같은 절반 속도가 적용된다.
 - 64회/초를 넘겨야 한다면 `timeBeginPeriod`가 아니라 `CreateWaitableTimerExW(CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)`(Win10 1803+, MSYS2 헤더에 상수 있음)를 쓸 것. 같은 하니스 실측: 30ms→32.0회/초, 15ms→62.1, **10ms→90.6회/초**, 5ms→171회/초. 시스템 타이머 해상도를 올리지 않고 15.6ms 장벽을 넘으며, **같은 전송률에서 wake는 오히려 절반**이다(32회/초 기준 sleep-loop 64.6 wake vs HR 타이머 32.0 wake). 단 인게임 검증은 미실시이며, one-shot 재arm으로 쓸 것(periodic 모드는 지터 3배).
 - 다른 앱이 시스템 타이머를 1ms로 올려도 **소용없다**. Windows 10 2004+/11에서 타이머 해상도는 프로세스 단위이고 `autokey_e.exe`는 `timeBeginPeriod`를 호출하지 않는다(실측: 시스템 current=1.0ms 상태에서도 미호출 프로세스의 `Sleep(1)`은 avg 15.56ms).
-- idle 폴링은 `Sleep(2)`(autokey_e.cpp:1441)로 적혀 있지만 **실제 주기는 1 tick ~15.6ms**다. 기본 해상도에서 `Sleep(1)`과 `Sleep(2)`는 실측 동일(15.56 vs 15.58ms)이므로 이 값 조정은 아무 효과가 없다. 키·버튼을 누른 뒤 첫 전송까지 0~16ms 지연이 있다.
-- 반복 대기 루프는 `Sleep(1)` **뒤에** 플래그를 재확인하므로(autokey_e.cpp:1434-1438) 키·버튼을 뗀 뒤 멈출 때까지 최대 1 tick(~16ms) 지연이 있다 — "즉시"가 아니다(재확인 조건은 `!isEnabled || (!AnyKeyActive() && !MouseActive())`, :1437). 그래도 남은 주기 전체(최대 ~200ms)를 기다리는 것보다 훨씬 빠르므로 이 체크는 유지할 것.
+- idle 폴링은 `Sleep(2)`(autokey_e.cpp:1554)로 적혀 있지만 **실제 주기는 1 tick ~15.6ms**다. 기본 해상도에서 `Sleep(1)`과 `Sleep(2)`는 실측 동일(15.56 vs 15.58ms)이므로 이 값 조정은 아무 효과가 없다. 키·버튼을 누른 뒤 첫 전송까지 0~16ms 지연이 있다.
+- 반복 대기 루프는 `Sleep(1)` **뒤에** 플래그를 재확인하므로(autokey_e.cpp:1547-1551) 키·버튼을 뗀 뒤 멈출 때까지 최대 1 tick(~16ms) 지연이 있다 — "즉시"가 아니다(재확인 조건은 `!isEnabled || (!AnyKeyActive() && !MouseActive())`, :1550 — 이 둘은 **스냅샷이 아니라 전역을 직접** 보고, SOLO/CHAIN도 구분하지 않는다). 그래도 남은 주기 전체(최대 ~200ms)를 기다리는 것보다 훨씬 빠르므로 이 체크는 유지할 것.
 
 ### 단일 인스턴스
-`FindWindowW(L"P2", L"P2")` → `SendMessage(WM_CLOSE)` → `IsWindow` 폴링 2초 → `TerminateProcess` 폴백(autokey_e.cpp:763-787). **창 클래스명과 타이틀이 둘 다 `"P2"`**여야 동작하므로 어느 한쪽만 바꾸면 중복 실행된다.
+`FindWindowW(L"P2", L"P2")` → `SendMessage(WM_CLOSE)` → `IsWindow` 폴링 2초 → `TerminateProcess` 폴백(autokey_e.cpp:887-911). **창 클래스명과 타이틀이 둘 다 `"P2"`**여야 동작하므로 어느 한쪽만 바꾸면 중복 실행된다.
 
-함정: 2초 상한은 폴링 루프(autokey_e.cpp:769-772)에만 적용되고 그 앞의 `SendMessage`(:766)에는 타임아웃이 없다. 기존 인스턴스의 메시지 펌프가 멈춰 있으면 새 인스턴스는 창을 만들기도 전에 무기한 블로킹되고 TerminateProcess 폴백에도 도달하지 못한다 — 이 경우 작업 관리자로 강제 종료해야 한다. (내성이 필요하면 `SendMessageTimeout(..., SMTO_ABORTIFHUNG, 2000, ...)`으로 교체.)
+함정: 2초 상한은 폴링 루프(autokey_e.cpp:893-896)에만 적용되고 그 앞의 `SendMessage`(:890)에는 타임아웃이 없다. 기존 인스턴스의 메시지 펌프가 멈춰 있으면 새 인스턴스는 창을 만들기도 전에 무기한 블로킹되고 TerminateProcess 폴백에도 도달하지 못한다 — 이 경우 작업 관리자로 강제 종료해야 한다. (내성이 필요하면 `SendMessageTimeout(..., SMTO_ABORTIFHUNG, 2000, ...)`으로 교체.)
 
 ### LoL 감지
-프로세스명 우선(`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `QueryFullProcessImageNameW(PROCESS_NAME_NATIVE)` → `League of Legends.exe` / `LeagueClient.exe`), 실패 시 창 제목 부분일치(`League of Legends (TM) Client`)로 폴백(autokey_e.cpp:1448-1504). 제목 폴백은 프로세스 핸들 열기가 권한 문제로 실패하는 경우를 커버한다.
+프로세스명 우선(`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `QueryFullProcessImageNameW(PROCESS_NAME_NATIVE)` → `League of Legends.exe` / `LeagueClient.exe`), 실패 시 창 제목 부분일치(`League of Legends (TM) Client`)로 폴백(autokey_e.cpp:1561-1617). 제목 폴백은 프로세스 핸들 열기가 권한 문제로 실패하는 경우를 커버한다.
 
-이 판정 결과는 `isEnabled` 자동 전환과 **마우스 차단 게이트(`g_lolForeground`) 둘 다**를 결정한다(`WinEventProc`, autokey_e.cpp:1518-1519).
+이 판정 결과는 `isEnabled` 자동 전환과 **마우스 차단 게이트(`g_lolForeground`) 둘 다**를 결정한다(`WinEventProc`, autokey_e.cpp:1631-1632).
 
 2026-08-03에 구 방식(`PROCESS_QUERY_INFORMATION | PROCESS_VM_READ` + PSAPI `GetModuleFileNameExW`)에서 교체했다. 실측(전체 399 프로세스, 2회 재현): 이름 조회 성공 196 → 215건(+19), 양쪽 성공한 196건은 **이름 100% 동일**(불일치 0건), 호출당 6.6us → 1.05us. `PROCESS_NAME_NATIVE`는 device 경로를 드라이브 문자로 변환하는 단계를 생략하는 것이 이득의 대부분이며, 반환 경로도 백슬래시 구분자라 basename 추출 로직은 그대로다. 이 경로는 `WinEventProc`를 통해 **메인 스레드**에서 실행되고 그 스레드가 키보드 훅도 서비스하므로 비용이 곧 훅 지연이다.
 
 `-lpsapi`(build.bat:36)는 이 교체로 실제 호출이 사라져 `-lcomctl32`와 마찬가지로 사문화됐다. 무해하므로 제거하지 말 것(exe가 추적되므로 링크 플래그 변경은 재빌드·재커밋을 동반하는 미검증 변경이 된다).
 
-**단, 오탐 방향이 있다.** `wcsstr` 부분일치(autokey_e.cpp:1498)는 프로세스를 전혀 확인하지 않으므로, 제목에 그 문자열이 들어간 아무 창(브라우저 탭·스트림 창 등)이 포그라운드가 되면 자동 ON된다. ON 상태에서는 그 앱에서 선택 키의 down/up이 모두 차단되고, **오탐은 `g_lolForeground`도 같이 켜므로 켜 둔 L/R 칸의 클릭 차단까지 그 앱에 적용된다**(마우스에 포그라운드 게이트를 뒀어도 오탐 경로는 막지 못한다). "특정 앱에서만 키·클릭 입력이 이상하다"는 증상이 나오면 그 창의 제목부터 확인할 것.
+**단, 오탐 방향이 있다.** `wcsstr` 부분일치(autokey_e.cpp:1611)는 프로세스를 전혀 확인하지 않으므로, 제목에 그 문자열이 들어간 아무 창(브라우저 탭·스트림 창 등)이 포그라운드가 되면 자동 ON된다. ON 상태에서는 그 앱에서 켜진 키의 down/up이 모두 차단되고, **오탐은 `g_lolForeground`도 같이 켜므로 켜 둔 L/R 칸의 클릭 차단까지 그 앱에 적용된다**(마우스에 포그라운드 게이트를 뒀어도 오탐 경로는 막지 못한다). "특정 앱에서만 키·클릭 입력이 이상하다"는 증상이 나오면 그 창의 제목부터 확인할 것.
 
 ### 창 배치
-`EnumDisplayMonitors`로 가장 왼쪽 모니터의 좌상단을 찾아 배치, 열거 실패 시 (0,0) 폴백(autokey_e.cpp:800-806). `WINDOW_EX_STYLE = WS_EX_TOPMOST | WS_EX_TOOLWINDOW`이라 작업표시줄과 alt-tab에 나오지 않는다 — 제목표시줄도 없으므로 창을 잃어버리면 되찾을 UI가 없다. 위치는 매번 계산되고 저장하지 않으므로 재실행하면 좌상단으로 돌아온다.
+`EnumDisplayMonitors`로 가장 왼쪽 모니터의 좌상단을 찾아 배치, 열거 실패 시 (0,0) 폴백(autokey_e.cpp:924-930). `WINDOW_EX_STYLE = WS_EX_TOPMOST | WS_EX_TOOLWINDOW`이라 작업표시줄과 alt-tab에 나오지 않는다 — 제목표시줄도 없으므로 창을 잃어버리면 되찾을 UI가 없다. 위치는 매번 계산되고 저장하지 않으므로 재실행하면 좌상단으로 돌아온다.
 
 ---
 
 ## 알려진 함정과 진단
 
 ### F2/F3 수동 토글은 다음 포그라운드 전환까지만 유지된다
-`WinEventProc`(autokey_e.cpp:1507-1535)가 창이 바뀔 때마다 LoL 여부만 보고 `isEnabled`를 무조건 재설정하고, F2/F3(:1164-1168, :1169-1174)는 수동 오버라이드 플래그를 남기지 않는다. 따라서 LoL에서 F3로 꺼도 다른 창에 갔다 돌아오면 다시 ON이 되고, LoL이 아닌 앱에서 F2로 켜면 다음 전환에서 OFF로 돌아간다. "F3로 껐는데 다시 켜진다"는 버그가 아니라 설계 결과이며, 영구 수동 오버라이드가 필요하면 별도 플래그를 도입해야 한다.
+`WinEventProc`(autokey_e.cpp:1620-1648)가 창이 바뀔 때마다 LoL 여부만 보고 `isEnabled`를 무조건 재설정하고, F2/F3(:1288-1292, :1293-1297)는 수동 오버라이드 플래그를 남기지 않는다. 따라서 LoL에서 F3로 꺼도 다른 창에 갔다 돌아오면 다시 ON이 되고, LoL이 아닌 앱에서 F2로 켜면 다음 전환에서 OFF로 돌아간다. "F3로 껐는데 다시 켜진다"는 버그가 아니라 설계 결과이며, 영구 수동 오버라이드가 필요하면 별도 플래그를 도입해야 한다.
 
-F2/F3는 `g_lolForeground`를 건드리지 않는다(:1163-1175에 그 쓰기가 없다). 그래서 **LoL 밖에서 F2로 켠 상태는 키만 반복되는 상태**다 — 마우스 차단·클릭 반복은 포그라운드가 실제로 LoL이어야 발동한다("전역 키 소비 범위" 참조).
+F2/F3는 `g_lolForeground`를 건드리지 않는다(:1287-1299에 그 쓰기가 없다). 그래서 **LoL 밖에서 F2로 켠 상태는 키만 반복되는 상태**다 — 마우스 차단·클릭 반복은 포그라운드가 실제로 LoL이어야 발동한다("전역 키 소비 범위" 참조).
 
 ### keyup 차단 비대칭 (stuck key) — 2026-08-03 해결됨
 과거에는 keydown 차단이 "누른 시점의 `isEnabled`", keyup 차단이 "뗀 시점의 `isEnabled`"로 각각 결정돼, 키를 누르고 있는 도중 앱이 켜지면(F2 또는 LoL 포그라운드 진입) 원본 down은 이미 앱에 전달됐는데 up만 삼켜져 대상 앱이 키를 눌린 채로 인식할 수 있었다.
 
-다중 키 확장과 함께 `KeyEntry::weBlockedDown`으로 해결했다(autokey_e.cpp:1181-1199) — **우리가 그 keydown을 삼켰을 때만 대응하는 keyup을 삼킨다.** 이 플래그는 `ClearPressedKeys()`(autokey_e.cpp:322-331)가 건드리지 않는다(이미 삼킨 down에 대한 up은 여전히 우리가 갚아야 하므로). 키 처리 로직을 고칠 때 이 대칭을 깨지 말 것.
+다중 키 확장과 함께 `KeyEntry::weBlockedDown`으로 해결했다(autokey_e.cpp:1305-1323) — **우리가 그 keydown을 삼켰을 때만 대응하는 keyup을 삼킨다.** 이 플래그는 `ClearPressedKeys()`(autokey_e.cpp:366-375)가 건드리지 않는다(이미 삼킨 down에 대한 up은 여전히 우리가 갚아야 하므로). 키 처리 로직을 고칠 때 이 대칭을 깨지 말 것.
 
-**마우스도 2026-10-28에 같은 방식으로 맞췄고, 2026-10-30에 구조가 더 단순해졌다**: 과거에는 "삼킨 down의 버튼"을 담는 전역 int 하나(`g_mouseBlockedDown`)였지만, 지금은 `MouseEntry::weBlockedDown`(autokey_e.cpp:224)이 **버튼별 항목 안에** 있다(:1253 저장 / :1261-1264 소비). 즉 키 칸과 글자 하나 다르지 않은 구조이고, 좌/우 교차 홀드에서 **엉뚱한 버튼의 up을 삼킬 경로 자체가 없다** — 어느 버튼의 up이냐가 그 항목을 고르는 인덱스이므로(:1247) 비교로 맞출 일이 없다. 전역 int 시절에는 "기억한 버튼과 지금 버튼이 같은가"를 올바르게 비교해야 성립하던 불변식이, 지금은 데이터 배치로 성립한다. `ClearPressedKeys()`도 키와 똑같이 처리한다: `g_mouse[i].pressed`만 내리고 `weBlockedDown`은 그대로 둔다(:328-330).
+**마우스도 2026-10-28에 같은 방식으로 맞췄고, 2026-10-30에 구조가 더 단순해졌다**: 과거에는 "삼킨 down의 버튼"을 담는 전역 int 하나(`g_mouseBlockedDown`)였지만, 지금은 `MouseEntry::weBlockedDown`(autokey_e.cpp:245)이 **버튼별 항목 안에** 있다(:1377 저장 / :1385-1388 소비). 즉 키 칸과 글자 하나 다르지 않은 구조이고, 좌/우 교차 홀드에서 **엉뚱한 버튼의 up을 삼킬 경로 자체가 없다** — 어느 버튼의 up이냐가 그 항목을 고르는 인덱스이므로(:1371) 비교로 맞출 일이 없다. 전역 int 시절에는 "기억한 버튼과 지금 버튼이 같은가"를 올바르게 비교해야 성립하던 불변식이, 지금은 데이터 배치로 성립한다. `ClearPressedKeys()`도 키와 똑같이 처리한다: `g_mouse[i].pressed`만 내리고 `weBlockedDown`은 그대로 둔다(:372-374). **`mode`도 건드리지 않는다** — 칸 설정은 사용자 것이고 홀드 상태만 초기화 대상이다.
 
 주의: 두 경로 모두 **자동 테스트가 불가능하다**. 훅이 `LLKHF_INJECTED`/`LLMHF_INJECTED`를 최상단에서 통과시키므로 합성 입력으로는 재현되지 않으며, 물리적으로 키·버튼을 누른 채 F2를 눌러야 검증된다. 자동으로 할 수 있는 최대는 `LowLevelMouseProc`의 상태 전이를 순수 함수 + 상태기계 시나리오로 재현하는 것이다("테스트" 절).
 
 ### L/R 칸이 켜진 채 커서를 P2 위에 두면 주입 클릭이 삼켜진다 (설계)
-`ShouldSwallowInjectedClick`(autokey_e.cpp:392-394)은 ON + L/R 중 하나라도 켜짐 + 커서가 P2 위일 때 **주입 클릭을 삼킨다.** 따라서 커서를 창 위에 올려둔 채 버튼을 홀드하면(물리 클릭 자체는 "자기 창 위 예외"로 통과하므로 반복이 시작되지도 않지만, 포그라운드 전환 등으로 홀드 상태만 남은 경우, 또는 연동 모드처럼 홀드 없이 발사되는 경우) worker가 쏘는 클릭은 전부 삼켜지고 게임에도 P2에도 아무 일이 없다. **의도된 동작이다** — 대안이 "R 칸이 켜져 있으면 앱이 스스로 종료" 또는 "L 칸이면 사이클마다 셀 토글 + ini 재작성"이기 때문이다(2026-10-28 에러 로그).
+`ShouldSwallowInjectedClick`(autokey_e.cpp:438-440)은 ON + L/R 중 하나라도 켜짐(SOLO·CHAIN 무관) + 커서가 P2 위일 때 **주입 클릭을 삼킨다.** 따라서 커서를 창 위에 올려둔 채 버튼을 홀드하면(물리 클릭 자체는 "자기 창 위 예외"로 통과하므로 반복이 시작되지도 않지만, 포그라운드 전환 등으로 홀드 상태만 남은 경우, 또는 ★ + CHAIN 칸처럼 홀드 없이 발사되는 경우) worker가 쏘는 클릭은 전부 삼켜지고 게임에도 P2에도 아무 일이 없다. **의도된 동작이다** — 대안이 "R 칸이 켜져 있으면 앱이 스스로 종료" 또는 "L 칸이면 사이클마다 셀 토글 + ini 재작성"이기 때문이다(2026-10-28 에러 로그).
 
 따라서 **클릭이 안 나간다는 신고가 오면 커서 위치를 먼저 물어볼 것.** 창이 가장 왼쪽 모니터 좌상단에 있어 평소 커서가 갈 자리는 아니지만, 소형 창이라 눈치채기 어렵다. 반대로 이 삼킴을 "버그"로 보고 가드를 지우면 자기 종료/셀 연타가 그대로 돌아온다.
 
 ### 실패는 무증상이다
-`RegisterClassW`(:798), `SetWindowsHookEx` 2건(키보드 :865 / 마우스 :868), `SetWinEventHook`(:871), `CreateThread`(:883) 모두 반환값을 검사하지 않고, 저장소 전체에 `MessageBox`·로그·`GetLastError` 호출이 0건이다. 창 생성 실패조차 조용히 `return 0`(:824-826). **UI의 ON/OFF는 훅이 살아 있다는 증거가 아니다** — 실행 시 LoL이 포그라운드면 키보드 훅도 마우스 훅도 죽어 있어도 ON으로 표시된다(:885-893). 마우스 훅 설치 실패는 특히 조용하다: UI의 `L`/`R` 칸은 그대로 켜진 색으로 보이고 ini에도 값이 남지만 클릭은 한 번도 나가지 않는다(비연동 모드에서 `g_mouse[].pressed`를 세우는 코드가 훅 안에만 있다, :1252 — 반면 **연동 모드는 클릭 후보에 홀드를 요구하지 않으므로, 선택 키를 누르고 있으면 마우스 훅이 죽어 있어도 클릭이 나간다**, :1398-1404. "연동을 켜고 키를 누르면 클릭이 되는데 버튼 홀드로는 안 된다"는 마우스 훅 실패의 전형적 신호다).
+`RegisterClassW`(:922), `SetWindowsHookEx` 2건(키보드 :989 / 마우스 :992), `SetWinEventHook`(:995), `CreateThread`(:1007) 모두 반환값을 검사하지 않고, 저장소 전체에 `MessageBox`·로그·`GetLastError` 호출이 0건이다. 창 생성 실패조차 조용히 `return 0`(:948-950). **UI의 ON/OFF는 훅이 살아 있다는 증거가 아니다** — 실행 시 LoL이 포그라운드면 키보드 훅도 마우스 훅도 죽어 있어도 ON으로 표시된다(:1010-1017). 마우스 훅 설치 실패는 특히 조용하다: UI의 `L`/`R` 칸은 그대로 켜진 색으로 보이고 ini에도 값이 남지만 클릭은 한 번도 나가지 않는다(`g_mouse[].pressed`를 세우는 코드가 훅 안에만 있다, :1376 — 반면 **`CELL_CHAIN` 마우스 칸은 ★가 켜져 있으면 클릭 후보에 홀드를 요구하지 않으므로, CHAIN 키를 누르고 있으면 마우스 훅이 죽어 있어도 클릭이 나간다**, `PlanCycle`:509-510. "★를 켜고 CHAIN 키를 누르면 클릭이 되는데 버튼 홀드로는 안 된다"는 마우스 훅 실패의 전형적 신호다. **그 칸이 SOLO면 이 신호가 나오지 않는다** — SOLO는 어느 모드에서도 홀드를 요구하므로 훅이 죽으면 그냥 조용히 아무 일도 없다).
 
-ini 경로도 같은 성향이다: `InitIniPath`가 실패하면 `g_iniPath`가 빈 문자열이 되고(:425-427, :435) `LoadSettings`/`SaveSettings`가 조용히 아무 일도 하지 않는다(autokey_e.cpp:440, :483). "설정이 저장되지 않는다"는 증상은 exe 옆에 `autokey_e.ini`가 생겼는지부터 확인할 것.
+ini 경로도 같은 성향이다: `InitIniPath`가 실패하면 `g_iniPath`가 빈 문자열이 되고(:527-529, :537) `LoadSettings`/`SaveSettings`가 조용히 아무 일도 하지 않는다(autokey_e.cpp:542, :588). "설정이 저장되지 않는다"는 증상은 exe 옆에 `autokey_e.ini`가 생겼는지부터 확인할 것.
 
 증상별 절단:
 - F2/F3 토글이 전혀 안 먹힘 → 키보드 훅 실패 (F2/F3 처리는 훅 안에만 존재)
-- F2 토글은 되는데 LoL 포커스 자동 전환만 안 됨 → WinEvent 훅 쪽(:871)
+- F2 토글은 되는데 LoL 포커스 자동 전환만 안 됨 → WinEvent 훅 쪽(:995)
 - 키 반복은 되는데 L/R 클릭만 안 나감 → 마우스 훅 실패 또는 **LoL 포그라운드 게이트**(비-LoL 앱에서는 정상적으로 안 나간다) 또는 커서가 P2 위 (위 절)
-- L/R을 둘 다 켰는데 한쪽 버튼만 나가는 것처럼 보임 → 정상이다. 클릭은 사이클당 1회뿐이고 둘 다 후보면 교대하므로 각 버튼의 실효 주기가 2배가 된다 ("타이밍" 절)
+- L/R을 둘 다 켰는데 한쪽 버튼만 나가는 것처럼 보임 → 정상이다. 클릭은 사이클당 1회뿐이고 둘 다 후보면 **R부터** 교대하므로 각 버튼의 실효 주기가 2배가 된다 ("타이밍" 절). **"R만 나간다"로 보이는 경우는 L 칸이 SOLO이고 L 버튼을 안 누른 것일 수도 있다** — ★ 모드에서 후보가 되는 쪽은 CHAIN 칸뿐이다
+- ★를 켰는데 아무 변화가 없음 → **CHAIN(금테) 칸이 0개**인 경우다. ★는 CHAIN 칸끼리만 묶으므로 SOLO 칸만 켜져 있으면 ★는 아무 일도 하지 않는다 (구 ini에서 올라온 설정이 전형적이다, "키 선택과 설정 파일" 절)
 - 창은 ON인데 키 반복만 안 먹음 → 권한(UIPI) 문제 우선 확인 (아래)
 
 원인을 좁히려면 해당 호출 지점에 임시로 반환값 검사 + `MessageBox`를 넣어 확인하고, 검증 후 반드시 제거할 것.
 
 ### 권한(UIPI) 제약
-빌드 산출물에는 권한 상승 요청이 없다(`asInvoker`, uiAccess 없음 — "매니페스트는 저장소에 없다" 참조). 대상 창이 관리자 권한으로 실행 중이면 UIPI가 worker의 `keybd_event`(:1318-1319)와 `mouse_event`(:1328-1329) 주입을 **둘 다** 차단하므로 press2도 관리자 권한으로 띄워야 한다. 이때 **창은 ON인데 키·클릭 반복만 안 먹는** 증상이 나오는데, 권한 부족으로 `OpenProcess`(:1454)가 실패해도 창 제목 폴백(:1497-1498)이 감지를 성공시키기 때문이다. "입력이 안 먹는다" 신고는 코드를 파기 전에 양쪽 프로세스의 권한 수준부터 확인할 것.
+빌드 산출물에는 권한 상승 요청이 없다(`asInvoker`, uiAccess 없음 — "매니페스트는 저장소에 없다" 참조). 대상 창이 관리자 권한으로 실행 중이면 UIPI가 worker의 `keybd_event`(:1446-1447)와 `mouse_event`(:1456-1457) 주입을 **둘 다** 차단하므로 press2도 관리자 권한으로 띄워야 한다. 이때 **창은 ON인데 키·클릭 반복만 안 먹는** 증상이 나오는데, 권한 부족으로 `OpenProcess`(:1567)가 실패해도 창 제목 폴백(:1610-1611)이 감지를 성공시키기 때문이다. "입력이 안 먹는다" 신고는 코드를 파기 전에 양쪽 프로세스의 권한 수준부터 확인할 것.
 
 ---
 
@@ -323,7 +337,7 @@ ini 경로도 같은 성향이다: `InitIniPath`가 실패하면 `g_iniPath`가 
 - **키 전송에 `SendInput` 사용** — hook callback 컨텍스트에서 입력이 무시됨. `keybd_event`로 복원 (af1c4be, 2026-04-05). 현재는 worker에서 보내므로 전제가 다르지만 되돌리려면 장시간 홀드 실측 검증 후에만.
 - **hook → `PostMessage`로 키 전송 위임** — E 입력 지연/누락 발생 (627579b, 2026-04-05). `PostMessage(WM_APP+1)`은 UI 갱신 요청 전용이며 키 전송 경로로 재사용하지 말 것.
 - **hook callback 내 `keybd_event` 직접 호출** — hook chain 동기 재진입으로 5~7회 만에 시스템 전체 프리즈 (438cdf0, 2026-04-06). 회귀 검증은 반드시 E를 길게 눌러서 할 것.
-- **`WM_TIMER` 기반 반복 전송** — worker 스레드 재설계 때 완전 폐기 (ee05c54, 2026-04-08). 키 전송을 타이머로 되돌리지 말 것. **예외**: 2026-10-27부터 `SetTimer`/`WM_TIMER`가 **설정 저장 디바운스 전용**으로 다시 존재한다(`SAVE_TIMER_ID`, autokey_e.cpp:115, `SetTimer` :512, `WM_TIMER` 핸들러 :1011-1020). 키 전송과 무관하며 핸들러는 `SaveSettings()`만 부른다 — 이 타이머에 전송 로직을 얹지 말 것.
+- **`WM_TIMER` 기반 반복 전송** — worker 스레드 재설계 때 완전 폐기 (ee05c54, 2026-04-08). 키 전송을 타이머로 되돌리지 말 것. **예외**: 2026-10-27부터 `SetTimer`/`WM_TIMER`가 **설정 저장 디바운스 전용**으로 다시 존재한다(`SAVE_TIMER_ID`, autokey_e.cpp:114, `SetTimer` :620, `WM_TIMER` 핸들러 :1135-1144). 키 전송과 무관하며 핸들러는 `SaveSettings()`만 부른다 — 이 타이머에 전송 로직을 얹지 말 것.
 - **`timeBeginPeriod(1)` + `-lwinmm`** — LoL 인게임 렉 (2668c37, 2026-04-08). 에러 로그 참조.
 - **하이브리드 `Sleep` + `QueryPerformanceCounter` 스핀** — 정확도는 전 방식 중 1위(sd 0.014ms)지만 코어 1개를 **97~100% 태운다**(실측). 게임 대상 유틸에서 채택 금지 (2026-08-03 측정).
 - **HR waitable timer의 periodic 모드** — 평균 주기는 더 정확하나 지터가 one-shot의 3배. one-shot 재arm 방식을 쓸 것 (2026-08-03 측정).
@@ -343,16 +357,16 @@ E 연타 중 스킬이 안 나가는 증상은 이 앱의 재발 가능한 핵�
 <!-- 형식: | 날짜 | 에러 | 원인 | 해결책 | -->
 
 ### 2026-10-28 - 주입 클릭이 자기 창 위에 떨어지면 자기 종료 / 셀 연타
-- **증상**: 마우스 클릭 반복 초기 구현(당시 3상태 `M` 칸)에서 worker의 반복 클릭은 **커서 위치에** 그대로 떨어진다(`SendMouseClick`은 `MOUSEEVENTF_MOVE`도 좌표도 쓰지 않는다, 현행 autokey_e.cpp:1326-1330). 그래서 커서가 P2 창 위에 있으면 그 클릭이 자기 창에 들어가, 우클릭이면 `WM_RBUTTONDOWN` → `WM_CLOSE`로 **다음 사이클에 앱이 스스로 종료**되고, 좌클릭이면 셀/슬라이더가 **사이클마다 토글되며 ini까지 다시 쓰인다**(리뷰 단계에서 발견, 사용자 신고 전)
-- **원인 [Certain]**: "커서 위치에 쏜다"와 "커서 위치의 창이 자기 자신일 수 있다"가 분리되어 있었다. 주입 입력은 키보드 훅과 같은 정책으로 `LLMHF_INJECTED`에서 **무조건 통과**시켰으므로(현행 autokey_e.cpp:1235-1243), 자기 창에 떨어지는 클릭을 걸러낼 지점이 어디에도 없었다. 게다가 이 경로는 `WM_LBUTTONDOWN` 핸들러를 그대로 타기 때문에 종료·토글·ini 쓰기라는 **파괴적 부작용**이 전부 실제로 실행된다
-- **해결 (근본)**: 주입 경로에 좁은 예외 하나를 뒀다 — `ShouldSwallowInjectedClick`(현행 autokey_e.cpp:392-394)이 참이면 그 주입 클릭을 삼킨다(:1239-1241). 조건은 "우리 칸이 켜짐 + 앱 ON + 커서가 우리 창 rect 안"뿐이라 다른 앱의 주입 클릭은 어디서도 영향을 받지 않는다. 짝이 되는 반대 예외도 같이 뒀다: **물리** 클릭이 자기 창 위면 차단하지 않는다(`ShouldBlockMouseDown`의 `overOwnWindow` 가드, :376) — 그래야 우클릭 종료와 셀 클릭이 살아 있다. 커서 rect 판정은 `PointInOwnWindow`(:359-361)라는 순수 함수로 떼어 진리표로 검증했고, 돌연변이(가드 제거)로 테스트가 실제로 깨지는지도 확인했다. **2026-10-30에 첫 인자가 `mouseMode`에서 `anyMouseSelected`로 바뀌었다** — 버튼이 둘로 쪼개지고 worker가 교대로 쏘므로, "이 메시지의 버튼"이 아니라 "아무 칸이라도 켜졌는가"로 넓혀야 같은 구멍이 다시 열리지 않는다(:387-389 주석)
+- **증상**: 마우스 클릭 반복 초기 구현(당시 3상태 `M` 칸)에서 worker의 반복 클릭은 **커서 위치에** 그대로 떨어진다(`SendMouseClick`은 `MOUSEEVENTF_MOVE`도 좌표도 쓰지 않는다, 현행 autokey_e.cpp:1454-1458). 그래서 커서가 P2 창 위에 있으면 그 클릭이 자기 창에 들어가, 우클릭이면 `WM_RBUTTONDOWN` → `WM_CLOSE`로 **다음 사이클에 앱이 스스로 종료**되고, 좌클릭이면 셀/슬라이더가 **사이클마다 토글되며 ini까지 다시 쓰인다**(리뷰 단계에서 발견, 사용자 신고 전)
+- **원인 [Certain]**: "커서 위치에 쏜다"와 "커서 위치의 창이 자기 자신일 수 있다"가 분리되어 있었다. 주입 입력은 키보드 훅과 같은 정책으로 `LLMHF_INJECTED`에서 **무조건 통과**시켰으므로(현행 autokey_e.cpp:1359-1367), 자기 창에 떨어지는 클릭을 걸러낼 지점이 어디에도 없었다. 게다가 이 경로는 `WM_LBUTTONDOWN` 핸들러를 그대로 타기 때문에 종료·토글·ini 쓰기라는 **파괴적 부작용**이 전부 실제로 실행된다
+- **해결 (근본)**: 주입 경로에 좁은 예외 하나를 뒀다 — `ShouldSwallowInjectedClick`(현행 autokey_e.cpp:438-440)이 참이면 그 주입 클릭을 삼킨다(현행 :1363-1365). 조건은 "우리 칸이 켜짐 + 앱 ON + 커서가 우리 창 rect 안"뿐이라 다른 앱의 주입 클릭은 어디서도 영향을 받지 않는다. 짝이 되는 반대 예외도 같이 뒀다: **물리** 클릭이 자기 창 위면 차단하지 않는다(`ShouldBlockMouseDown`의 `overOwnWindow` 가드, 현행 :422) — 그래야 우클릭 종료와 셀 클릭이 살아 있다. 커서 rect 판정은 `PointInOwnWindow`(현행 :405-407)라는 순수 함수로 떼어 진리표로 검증했고, 돌연변이(가드 제거)로 테스트가 실제로 깨지는지도 확인했다. **2026-10-30에 첫 인자가 `mouseMode`에서 `anyMouseSelected`로 바뀌었다** — 버튼이 둘로 쪼개지고 worker가 교대로 쏘므로, "이 메시지의 버튼"이 아니라 "아무 칸이라도 켜졌는가"로 넓혀야 같은 구멍이 다시 열리지 않는다(현행 :433-435 주석). 2026-11-01에 칸이 3상태가 된 뒤에도 그 인자는 `mode != CELL_OFF`의 OR이므로 **범위가 더 좁아지지 않았다**
 - **교훈**: **"커서 위치에 쏘는" 주입은 자기 창을 피하는 경로가 반드시 필요하다.** 자동화가 자기 UI를 조작할 수 있다는 것은 자기 종료·설정 파괴까지 포함한 파괴적 재진입이며, "자기 입력은 통과시킨다"는 깔끔한 규칙이 바로 그 구멍이 된다. 좌표를 지정하지 않는 주입(`mouse_event`의 상대/현재 위치 모드)은 "어디에 떨어지는지 모른다"와 같은 말이므로, 떨어질 수 있는 창 중에 **자기 자신**이 있는지 먼저 따져야 한다
 - **부수 확인**: 이 결함은 UI 경로 자동 검증(PostMessage)으로는 절대 드러나지 않는다 — `PostMessage`로 보낸 클릭은 훅을 통과하지 않으므로 주입/물리 구분 자체가 없다. 판정을 순수 함수로 분리한 뒤에야 "주입 + 자기 창 위" 조합을 테스트할 수 있었다
 
 ### 2026-10-27 - 휠 노치마다 ini 전체 재작성 → 훅 서비스 스레드 블로킹
 - **증상**: 속도 슬라이더 초기 구현에서 마우스 휠을 한 노치 돌릴 때마다 설정을 즉시 저장했다. 휠을 굴리는 동안 키보드 훅을 서비스하는 메인 스레드가 반복 블로킹된다(리뷰 단계에서 발견, 사용자 신고 전)
 - **원인 [Certain]**: 저장이 `WritePrivateProfileStringW`를 **키마다 1회** 호출하는 구조였다 — `[Keys]` 7개 + `[Options]` 2개 = **노치당 파일 전체 재작성 9회**. 호출당 실측 13.7~18ms이므로 노치 하나가 100ms 이상을 먹는다. 휠은 빠르게 수십 노치가 들어오는 입력인데 그 비용이 전부 `WindowProc` → 즉 키보드 훅과 같은 스레드에 쌓인다("아키텍처" 절의 직렬 실행). `LowLevelHooksTimeout`(~300ms)을 넘기면 키 차단이 조용히 건너뛰어지거나 훅이 해제된다
-- **해결 (근본)**: 두 겹으로 고쳤다. (1) 저장 자체를 `WritePrivateProfileSectionW` **섹션당 1회**로 바꿔 9회 쓰기를 2회로 줄였다(실측 18.2 → 3.5ms, `SaveSettings` 현행 autokey_e.cpp:481-507). (2) 휠 경로는 즉시 저장하지 않고 **500ms 디바운스 타이머**로 모아 쓴다(`MarkSettingsDirty` 현행 autokey_e.cpp:510-513, `WM_TIMER` 핸들러 :1011-1020). 드래그는 `WM_LBUTTONUP`에서 1회(:1033), 셀 토글은 이산 이벤트라 즉시(:1093), 종료 시 미저장분은 `WM_DESTROY`에서 flush(:1115) — 어느 경로로도 값이 유실되지 않는다
+- **해결 (근본)**: 두 겹으로 고쳤다. (1) 저장 자체를 `WritePrivateProfileSectionW` **섹션당 1회**로 바꿔 9회 쓰기를 2회로 줄였다(실측 18.2 → 3.5ms, `SaveSettings` 현행 autokey_e.cpp:586-615). (2) 휠 경로는 즉시 저장하지 않고 **500ms 디바운스 타이머**로 모아 쓴다(`MarkSettingsDirty` 현행 autokey_e.cpp:618-621, `WM_TIMER` 핸들러 현행 :1135-1144). 드래그는 `WM_LBUTTONUP`에서 1회(현행 :1157), 셀 토글은 이산 이벤트라 즉시(현행 :1217), 종료 시 미저장분은 `WM_DESTROY`에서 flush(현행 :1239) — 어느 경로로도 값이 유실되지 않는다
 - **교훈**: **메인 스레드에 동기 파일 I/O를 넣을 때는 1회 비용이 아니라 호출 빈도를 먼저 보라.** 18ms는 클릭 한 번이면 무해하고 휠 한 번이면 치명적이다. 이 저장소에서는 그 스레드가 키보드 훅도 서비스하므로 "느린 UI"가 아니라 "입력 소실"로 나타난다
 - **부수 확인**: `WritePrivateProfileStringW`의 비용은 디스크가 아니라 호출마다 파일 전체를 다시 파싱·기록하는 구조에서 나온다. 키가 7개로 늘면 비용도 7배가 된다 — 키를 더 추가할 때 이 경로를 다시 볼 것. **2026-10-30 현재 키 13개 + `[Options]` 4개(`IntervalMs`/`Chain`/`MouseL`/`MouseR`)이므로 구 구조였다면 노치당 17회 재작성이었다.** 섹션 단위 쓰기는 키 수가 늘어도 2회로 고정이다
 
@@ -391,6 +405,7 @@ E 연타 중 스킬이 안 나가는 증상은 이 앱의 재발 가능한 핵�
 - **LL 훅의 판정은 순수 함수로 분리해 진리표로 검증한다**: `ShouldBlockMouseDown` / `ShouldSwallowInjectedClick` / `PointInOwnWindow`처럼 전역을 읽지 않는 함수로 떼면 훅 콜백은 "값 모아서 호출 + 반환값대로 `return 1`"만 남고, 조건 조합 전수(모드 x 버튼 x ON/OFF x 포그라운드 x 자기창)를 앱 밖에서 돌릴 수 있다. 훅 안에 조건을 인라인으로 적으면 그 분기는 **합성 입력이 훅을 통과하는 구조상 영구히 수동 검증 대상**이 된다
 - **하니스는 소스를 복사하지 말고 `#include`해서 배포되는 함수 자체를 호출한다.** 판정 로직을 하니스에 베껴 쓰면 소스가 바뀔 때 복사본만 녹색이 되는 drift가 생기고, 그 녹색은 배포 코드에 대해 아무것도 증명하지 않는다 (단일 소스 파일 프로젝트에서는 `#include`가 가장 싼 방법이다)
 - **교대 선택은 순수 함수 + 호출자 로컬 커서로 구현한다**: "둘 중 하나를 번갈아"라는 규칙은 다음 차례를 담는 상태가 필요한데, 그 커서를 전역에 두면 읽기 전용이던 소비자(worker)가 공유 상태의 writer가 된다. 판정을 `PickMouseClick(후보들, int& 커서)` 같은 순수 함수로 떼고 커서는 호출자의 스택에 두면, 단일 writer 불변식을 지키면서 교대 시퀀스를 앱 밖에서 전수 검증할 수 있다
+- **worker의 전송 정책은 스냅샷 입력의 순수 함수로 두고 전수표로 검증한다**(`PlanCycle(CycleSnapshot) -> CyclePlan`): 사이클 머리에서 전역을 한 번 복사해 넘기면 정책이 전역을 전혀 읽지 않게 되어 (칸 수 x 상태 수 x 홀드 x 모드) 조합을 독립 오라클과 행 단위로 대조할 수 있고, 덤으로 사이클 도중 토글이 한 사이클의 판단을 반쯤 바꾸지 못한다. 반대로 정책을 루프 안에 인라인으로 적으면 그 분기는 물리 입력 없이는 못 밟는 수동 검증 대상이 된다. 단 스냅샷 구조체는 **값 초기화가 아니라 전체 대입에 의존**하므로 필드를 늘릴 때 `= {}`나 전수표 축을 함께 늘릴 것
 - **하니스 자체를 돌연변이로 검증한다**: 판정 함수의 게이트를 하나 지우거나 비교를 반전시켜 **테스트가 실제로 깨지는지** 보고 되돌린다. 깨지지 않으면 그 테스트는 아무것도 감시하지 않고 있었던 것이다 — 통과한 테스트 수보다 "검출된 돌연변이 수"가 하니스의 실력이다
 
 ## 학습 사항
@@ -450,9 +465,20 @@ E 연타 중 스킬이 안 나가는 증상은 이 앱의 재발 가능한 핵�
 ### 2026-10-30 (7/D/F 키 · 4x4 슬롯 테이블 · 마우스 L/R 분리 · 번갈아 클릭 · 기본 150ms)
 - **사용자 결정 4건이 이번 변경의 전부다**: (1) 그리드를 4x4로 늘려 키를 13개(7·D·F 추가)로, (2) 3상태 `M` 칸을 폐지하고 **L / R 두 칸으로 분리**, (3) 두 칸을 다 켜면 **번갈아** 클릭, (4) 기본 주기 100 → **150ms**. 어느 것도 대기 구조·훅 계약·종료 순서를 건드리지 않는 범위에서 끝냈고, 키보드 훅 본문은 직전 커밋과 **바이트 동일**이다
 - **3상태 순환을 버린 것이 구조를 단순하게 만들었다.** `M` 칸은 "꺼짐 → 우클릭 → 좌클릭"이라 (a) 두 버튼을 동시에 쓸 수 없고, (b) 상태를 2비트로 인코딩해야 하고, (c) 모드가 바뀌는 순간 떠나는 모드의 홀드 플래그를 손으로 내려야 했다. L/R을 **키 칸과 같은 모양의 독립 토글**로 바꾸자 세 문제가 한꺼번에 사라졌다 — `MouseEntry`는 `KeyEntry`의 쌍둥이고, 가드 비트는 버튼당 1비트이고, 홀드 플래그 정리는 키 칸과 같은 한 줄이다. **"상태가 늘어나면 모드를 늘리지 말고 항목을 늘려라"**가 이번의 교훈이다
-- **버튼별 항목이 교차 홀드 stuck을 비교가 아니라 데이터 배치로 막는다.** 과거 `g_mouseBlockedDown`(전역 int)은 "삼킨 down의 버튼"을 기억하고 up마다 "같은 버튼인가"를 비교해야 성립했다 — 비교를 틀리면 우클릭 홀드 중 좌클릭에서 엉뚱한 up이 삼켜져 대상 앱에 버튼이 눌린 채 남는다. 지금은 `weBlockedDown`이 `g_mouse[버튼]` 안에 있고 up 메시지가 그 인덱스를 고르므로(autokey_e.cpp:1247, :1261-1264) **잘못된 버튼을 건드릴 경로 자체가 없다.** 불변식을 "올바른 비교"에서 "올바른 자료구조"로 옮긴 것이 이번 구현에서 가장 값싼 안전장치였다
-- **번갈아 클릭의 상태는 worker 스택 로컬로 뒀다**(`nextMouse`, autokey_e.cpp:1379). 전역에 두면 worker가 전역에 **쓰는** 첫 사례가 되어 단일 writer 불변식이 깨지고, 그 순간 "volatile로 충분한 이유"가 사라진다. 그래서 판정은 순수 함수(`PickMouseClick`, :402-411)로, 커서는 호출자 스택으로 쪼갰다 — 지터용 난수 상태(`rngState`)와 똑같은 패턴이다. 후보가 하나뿐인 사이클은 커서를 건드리지 않으므로, 두 번째 버튼을 나중에 켜도 교대가 재시작되지 않고 이어진다
+- **버튼별 항목이 교차 홀드 stuck을 비교가 아니라 데이터 배치로 막는다.** 과거 `g_mouseBlockedDown`(전역 int)은 "삼킨 down의 버튼"을 기억하고 up마다 "같은 버튼인가"를 비교해야 성립했다 — 비교를 틀리면 우클릭 홀드 중 좌클릭에서 엉뚱한 up이 삼켜져 대상 앱에 버튼이 눌린 채 남는다. 지금은 `weBlockedDown`이 `g_mouse[버튼]` 안에 있고 up 메시지가 그 인덱스를 고르므로(현행 autokey_e.cpp:1371, :1385-1388) **잘못된 버튼을 건드릴 경로 자체가 없다.** 불변식을 "올바른 비교"에서 "올바른 자료구조"로 옮긴 것이 이번 구현에서 가장 값싼 안전장치였다
+- **번갈아 클릭의 상태는 worker 스택 로컬로 뒀다**(`nextMouse`, 현행 autokey_e.cpp:1505). 전역에 두면 worker가 전역에 **쓰는** 첫 사례가 되어 단일 writer 불변식이 깨지고, 그 순간 "volatile로 충분한 이유"가 사라진다. 그래서 판정은 순수 함수(`PickMouseClick`, 현행 :449-458)로, 커서는 호출자 스택으로 쪼갰다 — 지터용 난수 상태(`rngState`)와 똑같은 패턴이다. 후보가 하나뿐인 사이클은 커서를 건드리지 않으므로, 두 번째 버튼을 나중에 켜도 교대가 재시작되지 않고 이어진다 (당시 교대 시작은 L이었고, 2026-11-01에 사용자 요청으로 R로 바꿨다)
 - **클릭을 사이클당 최대 1회로 고정한 것이 성능 결정이다.** 버튼마다 1회씩 쏘면 두 칸을 켠 사용자의 사이클당 주입 수가 조용히 늘고, 이 저장소에서 "사이클당 주입 수"는 인게임 렉 리스크와 직결된 축이다("타이밍" 절). 교대를 택하면 **클릭 비율이 버튼 수와 무관하게 1/주기로 고정**되고, 대가는 각 버튼의 실효 주기가 2배가 되는 것뿐이다 — 문서로 남길 비대칭이지 버그가 아니다
 - **기본 주기를 150ms로 올린 것은 안전 쪽 기본값이다.** 키 13개 + 클릭 1회면 연동 모드 burst가 최대 14 주입/주기이므로, 기본값을 100에 두면 처음 켠 사용자가 곧바로 가장 무거운 설정 근처에 놓인다. 150은 5ms 격자 위이므로 `SnapInterval`의 특례도 늘지 않는다
 - **검증**: g++ `-Wall -Wextra` 경고 0, exe 36,864B(strip 적용, `objdump -h | grep -c debug` = 0), import 4개(GDI32/KERNEL32/msvcrt/USER32 — winmm 없음, 새 import 없음). 소스를 `#include`한 순수 함수 하니스 **195 PASS**(16슬롯 기하, 차단/삼킴 진리표, `LowLevelMouseProc` 상태기계 — 두 버튼 동시 홀드에서 stuck 0, `PickMouseClick` 교대 시퀀스, 스냅, 전 픽셀 매핑, 디더링 35/150/200), PostMessage UI 검증 **80 PASS**(76x132 클라이언트, 16슬롯 비간섭 토글, 기본 150, 재시작 유지, 클램프, 레거시 `Mouse` 키 무시), 돌연변이 대조 **9종 전부 검출**
-- **미검증 [Hypothesis]**: **마우스 물리 경로 전체**(`LLMHF_INJECTED` 때문에 합성 입력으로 차단 판정에 도달 불가 — 물리 홀드 시 클릭 반복, **두 버튼 동시 홀드에서 실제 L R L R 교대**, 좌/우 교차 홀드 stuck 부재, 포그라운드 게이트의 실제 동작), 7/D/F의 실제 전송 출력, ★ 연동의 burst + 클릭 1회가 게임에서 내는 결과, 인게임 성능 영향(키가 13개로 늘어 burst 상한이 커졌다), 물리 마우스 휠 조작. 자동 검증은 순수 함수(195)와 UI 경로(80)에 한정된다
+- **미검증 [Hypothesis]**: **마우스 물리 경로 전체**(`LLMHF_INJECTED` 때문에 합성 입력으로 차단 판정에 도달 불가 — 물리 홀드 시 클릭 반복, **두 버튼 동시 홀드에서 실제로 교대하는지**(당시 순서는 L부터였고 2026-11-01에 R 먼저로 바뀌었다), 좌/우 교차 홀드 stuck 부재, 포그라운드 게이트의 실제 동작), 7/D/F의 실제 전송 출력, ★ 연동의 burst + 클릭 1회가 게임에서 내는 결과, 인게임 성능 영향(키가 13개로 늘어 burst 상한이 커졌다), 물리 마우스 휠 조작. 자동 검증은 순수 함수(195)와 UI 경로(80)에 한정된다
+
+### 2026-11-01 (칸별 3상태 OFF/SOLO/CHAIN · PlanCycle 분리 · 금테 표시 · 교대 시작 R)
+- **사용자 결정 5건이 이번 변경의 전부다**: (1) 키 13칸과 L/R 칸을 **3상태**로 바꿔 클릭마다 OFF → SOLO → CHAIN → OFF 순환, (2) **SOLO는 개별**(자기 홀드만), (3) **★는 CHAIN 칸끼리만 묶는다**(SOLO는 끌려가지 않고, SOLO 홀드로는 연동이 트리거되지 않는다), (4) **★를 끄면 CHAIN = SOLO**, (5) CHAIN 표시는 금색 테두리, 교대 클릭은 **R 먼저**. 대기 구조·훅 계약·종료 순서·레이아웃 상수는 하나도 건드리지 않았다
+- **10-30의 "모드를 늘리지 말고 항목을 늘려라"와 모순이 아니다.** 그때 `M` 칸을 버린 이유는 **한 칸이 서로 다른 두 대상(좌/우 버튼)을 번갈아 가리켰기** 때문이고, 그건 항목 분리로 풀어야 하는 문제였다. 이번 3상태는 **한 칸이 자기 자신에 대해 갖는 상태가 진짜 3개**(안 쓴다 / 혼자 쓴다 / 묶어서 쓴다)이므로 모드가 맞는 모델이다. 교훈을 수정하면: **"대상이 여러 개면 항목을 늘리고, 한 대상의 상태가 여러 개면 모드를 늘려라."** 대신 모드를 늘리면 조합이 폭발하므로(15칸 x 3상태 x 홀드 x ★) 그 폭발을 감당할 장치를 같이 넣어야 했다 — 그게 다음 항목이다
+- **이번 구현의 핵심은 3상태가 아니라 `PlanCycle`이다.** 전송 정책을 `PlanCycle(CycleSnapshot) -> CyclePlan`(autokey_e.cpp:483-513) 순수 함수로 떼어내자 worker 루프는 "스냅샷 뜨고 → 계획 받고 → 계획대로 쏘고 → 기다린다"만 남았고(:1507-1556), 정책 전체가 **앱 밖에서 2,592행 전수 대조**가 됐다. 정책이 worker 루프 안에 인라인으로 있으면 같은 조합은 전부 "물리 입력으로만 밟을 수 있는" 수동 검증 대상이 됐을 것이다 — 모드를 늘리는 변경에서 가장 먼저 해야 할 일은 **판정을 입력-출력 함수로 만드는 것**이었다
+- **스냅샷으로 넘긴 이유는 테스트 가능성과 사이클 내 일관성 둘 다다**(:306-312, :1511-1520). 정책이 전역을 직접 읽으면 (a) 하니스가 전역을 세팅해야 해서 "배포 함수 그대로 호출"이 깨지고, (b) 사이클 중간에 사용자가 칸을 토글하면 같은 사이클 안에서 키는 CHAIN 기준, 클릭은 SOLO 기준으로 나가는 **반쯤 바뀐 판단**이 가능하다. 단 스냅샷은 원자적 복사가 아니므로 "복사 중 토글"은 여전히 섞일 수 있고, 그 최악은 기존과 같은 1회 추가/누락이다 — 스냅샷이 해결한 것과 안 한 것을 섞어 적지 말 것
+- **가드를 64비트로 올린 것은 선택이 아니라 필수였다.** 칸당 1비트로는 SOLO ↔ CHAIN 전환이 `UpdateUI` 가드에 **삼켜진다**(autokey_e.cpp:1409-1417). 그 변화는 바탕색이 아니라 2px 테두리만 바꾸는 것이라 삼켜져도 눈에 잘 안 띄고, 그래서 더 위험했다. 칸당 2비트로 올리면 `1 + 2*13 + 1 + 2*2 = 32`비트라 `unsigned`에 **딱 맞지만 여유가 0이므로** 타입을 `unsigned long long`으로, `static_assert`를 64 기준으로 함께 바꿨다(:173)
+- **CHAIN을 색이 아니라 테두리로 표시한 것은 18px 칸의 제약이다.** 세 번째 바탕색을 쓰면 L(파랑)·R(빨강)·궁극기(주황)와 구분이 무너진다. 금색(★와 같은 색) 2px 안쪽 테두리는 "이 칸이 ★에 묶인다"를 ★ 칸과 같은 색으로 읽히게 하고, 구현도 `FillRect` 2회(금색 전체 → `InflateRect(-2)`를 모드 색으로 덮기)라 **새 GDI 객체가 없다**(:782-791). 기하는 전혀 바뀌지 않으므로 레이아웃 상수도 창 크기도 그대로다
+- **하위 호환은 설계가 아니라 인코딩이 겹친 결과다**: 옛 ini의 `1`이 지금의 SOLO라 옛 파일은 자연히 단독 ON으로 읽힌다. 다만 `Chain=1`은 살아 있으므로 **★ 칸은 켜져 보이는데 CHAIN 칸이 0개**인 상태가 나올 수 있다 — "존재 != 발동"의 교과서적 사례이고, 자동 승격은 하지 않기로 했다(어느 칸을 묶을지는 사용자 결정이며, 켜진 칸 전부를 CHAIN으로 올리면 이번에 폐지한 "켜진 키 전부 묶기"를 되살리는 셈이다). 문서의 증상별 절단에 "★를 켰는데 변화 없음 → CHAIN 칸 0개" 항목을 추가해 뒀다
+- **검증**: g++ `-Wall -Wextra` 경고 0, exe 38,912B(strip 적용, `objdump -h | grep -c debug` = 0), import 4개(GDI32/KERNEL32/msvcrt/USER32 — winmm 없음, 새 import 없음: `InflateRect`도 USER32다). 소스를 `#include`한 순수 함수 하니스 **3,427 PASS**(`PlanCycle` 전수 **2,592행** 독립 오라클 대조, `PickMouseClick`의 R L 시퀀스, `NextCellMode`/`ClampCellMode` 순환·클램프, 16슬롯 기하, 훅 판정 진리표·`LowLevelMouseProc` 상태기계, 디더링), PostMessage UI 검증 **144 PASS**(15칸 3상태 순환·비간섭, 금색 테두리 픽셀, ini 클램프·구 `1` 호환, 재시작 유지), 돌연변이 대조 **14종 전부 검출**(순수 함수 하니스 10 + UI 하니스 4)
+- **미검증 [Hypothesis]**: **물리 입력 경로 전체**(`LLKHF_INJECTED`/`LLMHF_INJECTED` 때문에 합성 입력으로 차단 판정에 도달 불가 — SOLO 홀드와 CHAIN 홀드의 실제 출력 차이, ★ 켜짐에서 CHAIN 칸 전부가 정말 함께 나가는지, 좌/우 교차 홀드 stuck 부재), **`nextMouse` 초기값의 실동작**(순수 함수 수준에서는 첫 클릭이 R임을 전수로 확인했지만, 실제 두 버튼 동시 홀드에서 첫 클릭이 R로 나가는지는 물리 검증 대상이다), 인게임 성능 영향(사이클당 주입 수의 상한은 14로 그대로지만 CHAIN 조합에 따라 분포가 달라진다), 물리 마우스 휠 조작. 자동 검증은 순수 함수(3,427)와 UI 경로(144)에 한정된다
