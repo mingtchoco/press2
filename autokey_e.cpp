@@ -175,6 +175,18 @@ constexpr int CELL_MODE_COUNT = 3;
 // is an unsigned long long and this is the width that must hold.
 static_assert(1 + 2 * KEY_COUNT + 1 + 2 * MOUSE_COUNT <= 64, "UpdateUI guard bits");
 
+// F4 one-shot: pressing F4 while the app is ON types this string ONCE (it is
+// not a repeat cell and it has no grid cell, no colour and no ini entry).
+// Written with escapes on purpose so the literal does not depend on the source
+// file's encoding: C, U+039F GREEK CAPITAL LETTER OMICRON, O, N. The omicron
+// looks like a latin O but is a different codepoint - that is the point of the
+// string, so do NOT "fix" it to L"COON".
+constexpr const wchar_t F4_TEXT[] = L"C\x039FON";
+// Two INPUT records per character (down + up). 16 leaves room for a longer
+// string without touching BuildUnicodeTypeInputs, which refuses to write a
+// partial run if the buffer is ever too small.
+constexpr int MAX_TYPE_INPUTS = 16;
+
 // League of Legends process detection
 constexpr wchar_t LOL_PROCESS_1[] = L"League of Legends.exe";
 constexpr wchar_t LOL_PROCESS_2[] = L"LeagueClient.exe";
@@ -189,8 +201,10 @@ constexpr COLORREF DISABLED_TEXT_COLOR = RGB(128, 128, 128); // Gray
 // the background alone says which mode a cell is in: grey OFF, green SOLO, red
 // CHAIN. Per-cell accent colours are deliberately gone - the ultimate key had
 // its own orange and the mouse cells their own blue/red, which at 18px left no
-// way to also show three modes. The two mouse cells are told apart from the
-// keys by SHAPE instead (an ellipse, see DrawKeyGrid).
+// way to also show three modes. All 15 cells are plain filled rectangles, so
+// the mouse L/R cells are told apart from the keys only by their POSITION in
+// the grid (the bottom row) - there is no per-kind colour and no per-kind
+// shape any more (see DrawKeyGrid).
 constexpr COLORREF KEY_OFF_BG_COLOR = RGB(214, 214, 214);   // cell OFF
 constexpr COLORREF KEY_ON_BG_COLOR = RGB(34, 139, 34);      // cell SOLO
 constexpr COLORREF KEY_CHAIN_BG_COLOR = RGB(200, 40, 40);   // cell CHAIN
@@ -273,6 +287,15 @@ wchar_t g_iniPath[MAX_PATH] = {0};  // settings file, next to the exe
 // thread (WindowProc / WinMain); the worker thread only reads them.
 volatile int g_intervalMs = DEFAULT_INTERVAL_MS;
 volatile bool g_chainMode = false;
+
+// F4 one-shot type requests. The keyboard hook (main thread) only ever
+// INCREMENTS this; the worker keeps a stack-local copy of the value it last
+// acted on and compares, so it still never writes a global - the single-writer
+// invariant holds exactly as it does for every other cross-thread flag. A
+// boolean the worker cleared after typing would break it.
+// Edge-triggered: the worker reacts to "the counter changed", not to how much
+// it changed, so several presses inside one poll collapse into one typing run.
+volatile unsigned g_typeRequestSeq = 0;
 
 // Is League of Legends the foreground window? Seeded in WinMain and refreshed
 // by WinEventProc on every foreground change (both main thread). Unlike the
@@ -397,6 +420,24 @@ bool AnyMouseSelected() {
         if (g_mouse[i].mode != CELL_OFF) return true;
     }
     return false;
+}
+
+// Pure: does the keyboard hook consume this key as the F4 one-shot?
+// All four conditions are required, and each one matters:
+//   isDown   - only the keydown is taken, exactly like F2/F3 (the keyup is left
+//              alone and reaches the system).
+//   vk       - VK_F4 only.
+//   flags    - LLKHF_ALTDOWN must be CLEAR. Swallowing Alt+F4 would kill
+//              "close window" system wide, which is not ours to break.
+//   enabled  - unlike F2/F3 this is NOT a global consume: with the app OFF the
+//              F4 press passes through untouched to whatever has focus.
+// Kept free of globals so the truth table can be checked outside the app.
+bool ShouldConsumeF4(bool isDown, DWORD vk, DWORD flags, bool enabled) {
+    if (!isDown) return false;
+    if (vk != VK_F4) return false;
+    if (!enabled) return false;
+    if (flags & LLKHF_ALTDOWN) return false;
+    return true;
 }
 
 // Pure: is pt inside the rect (right/bottom exclusive, same convention as the
@@ -744,8 +785,6 @@ HBRUSH CellModeBrush(int mode) {
 void DrawKeyGrid(HDC hdc) {
     HFONT prevFont = NULL;
     if (hFontKey) prevFont = (HFONT)SelectObject(hdc, hFontKey);
-    HGDIOBJ prevPen = NULL;
-    HGDIOBJ prevBrush = NULL;
     SetBkMode(hdc, TRANSPARENT);
 
     for (int i = 0; i < GRID_CELL_COUNT; i++) {
@@ -759,7 +798,6 @@ void DrawKeyGrid(HDC hdc) {
         HBRUSH brush = hBrushKeyOff;
         COLORREF fg = KEY_OFF_TEXT_COLOR;
         const wchar_t* text = L"";
-        bool round = false;         // the two mouse cells are not rectangles
 
         if (GRID_SLOTS[i].kind == GridSlot::Star) {
             text = L"★";
@@ -769,16 +807,17 @@ void DrawKeyGrid(HDC hdc) {
             }
         } else if (GRID_SLOTS[i].kind == GridSlot::MouseLeft ||
                    GRID_SLOTS[i].kind == GridSlot::MouseRight) {
-            // Same three mode colours as a key, but drawn as an ellipse so the
-            // mouse R cell cannot be misread as the ultimate key R one row up -
-            // at 18px the shape is the only cue left once the colour says mode.
+            // Drawn exactly like a key cell: same three mode colours, same
+            // font, same filled rectangle. The consequence is that the mouse R
+            // cell and the ultimate key R one row up look IDENTICAL in the same
+            // mode - the only cue left is the position (row 4 col 4 vs row 1
+            // col 4). That is the requested behaviour, not an oversight.
             const int mi = (GRID_SLOTS[i].kind == GridSlot::MouseLeft)
                            ? MOUSE_LEFT : MOUSE_RIGHT;
             const int mode = g_mouse[mi].mode;
             text = g_mouse[mi].label;
             brush = CellModeBrush(mode);
             if (mode != CELL_OFF) fg = KEY_ON_TEXT_COLOR;
-            round = true;
         } else {
             const KeyEntry& key = g_keys[GRID_SLOTS[i].keyIndex];
             const int mode = key.mode;
@@ -787,19 +826,9 @@ void DrawKeyGrid(HDC hdc) {
             if (mode != CELL_OFF) fg = KEY_ON_TEXT_COLOR;
         }
 
-        if (round) {
-            // Ellipse inscribed in the cell. The fill is the cached mode brush
-            // and the pen is the stock NULL_PEN, so nothing new is created and
-            // there is no GDI object to leak (stock objects are never deleted).
-            // The four corners outside the ellipse are left alone and keep the
-            // window background that WM_ERASEBKGND already painted.
-            HGDIOBJ pb = SelectObject(hdc, brush ? (HGDIOBJ)brush
-                                                 : GetStockObject(NULL_BRUSH));
-            HGDIOBJ pp = SelectObject(hdc, GetStockObject(NULL_PEN));
-            Ellipse(hdc, cell.left, cell.top, cell.right, cell.bottom);
-            if (!prevBrush) prevBrush = pb;
-            if (!prevPen) prevPen = pp;
-        } else if (brush) {
+        // Every cell is a filled rectangle - no pen and no brush is selected
+        // into the DC, so there is nothing to restore and no GDI object to leak.
+        if (brush) {
             FillRect(hdc, &cell, brush);
         }
 
@@ -807,8 +836,6 @@ void DrawKeyGrid(HDC hdc) {
         DrawTextW(hdc, text, -1, &cell, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    if (prevPen) SelectObject(hdc, prevPen);
-    if (prevBrush) SelectObject(hdc, prevBrush);
     if (prevFont) SelectObject(hdc, prevFont);
 }
 
@@ -1307,6 +1334,18 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             }
         }
 
+        // F4 one-shot: ask the worker to type F4_TEXT once. Flag only, like
+        // every other branch here - the sending itself must stay in the worker.
+        // The predicate is pure (ShouldConsumeF4) and gated on isEnabled and on
+        // Alt being up, so Alt+F4 and every F4 press while the app is OFF fall
+        // through to the system untouched. Only the keydown is swallowed; the
+        // keyup is left alone, same as F2/F3. Nothing to update on screen and
+        // nothing to persist, so no WM_APP + 1 and no CommitSettings here.
+        if (ShouldConsumeF4(isDown, pKeyboard->vkCode, pKeyboard->flags, isEnabled)) {
+            g_typeRequestSeq++;      // main thread is the only writer
+            return 1;
+        }
+
         for (int i = 0; i < KEY_COUNT; i++) {
             KeyEntry& key = g_keys[i];
             if (pKeyboard->vkCode != key.vk) continue;
@@ -1466,6 +1505,51 @@ void SendMouseClick(int index) {
     mouse_event(g_mouse[index].upFlag, 0, 0, 0, 0);
 }
 
+// Pure: fill out[] with the keyboard INPUT records that type `text`, two per
+// character (down, then up). KEYEVENTF_UNICODE with wVk = 0 and the codepoint
+// in wScan is the only way to send a character that has no virtual key, which
+// is exactly the case for U+039F in F4_TEXT - MapVirtualKey/keybd_event cannot
+// express it at all.
+// Returns the number of records written. It returns 0 and writes NOTHING when
+// there is nothing to send or the buffer is too small: all-or-nothing, so a
+// caller can never emit half a string.
+int BuildUnicodeTypeInputs(const wchar_t* text, INPUT* out, int cap) {
+    if (!text || !out || cap <= 0) return 0;
+    int len = 0;
+    while (text[len] != L'\0') len++;
+    const int need = len * 2;
+    if (need == 0 || need > cap) return 0;
+    for (int i = 0; i < len; i++) {
+        for (int half = 0; half < 2; half++) {
+            INPUT& rec = out[i * 2 + half];
+            rec = INPUT{};
+            rec.type = INPUT_KEYBOARD;
+            rec.ki.wVk = 0;                      // unicode records carry no VK
+            rec.ki.wScan = (WORD)text[i];        // the codepoint itself
+            rec.ki.dwFlags = KEYEVENTF_UNICODE |
+                             (half ? KEYEVENTF_KEYUP : 0u);
+        }
+    }
+    return need;
+}
+
+// Type a string ONCE. Called ONLY from the worker thread, exactly like SendKey
+// and SendMouseClick - never from a hook callback.
+// SendInput is listed in CLAUDE.md as an abandoned approach, but that verdict
+// is about calling it from INSIDE the hook callback, where the injected input
+// was simply ignored; from the worker thread the premise is different and this
+// is the only call that can carry a character without a virtual key. The key
+// REPEAT path is untouched and still uses keybd_event (SendKey).
+// The injected characters come back into LowLevelKeyboardProc as VK_PACKET with
+// LLKHF_INJECTED, which the very top of that callback already passes straight
+// through, so no extra hook handling is needed.
+// Touches no GDI object and no HWND: the worker outlives both.
+void TypeText(const wchar_t* text) {
+    INPUT records[MAX_TYPE_INPUTS];
+    const int n = BuildUnicodeTypeInputs(text, records, MAX_TYPE_INPUTS);
+    if (n > 0) SendInput((UINT)n, records, sizeof(INPUT));
+}
+
 // Worker-local PRNG. xorshift32 instead of <random> to keep the statically
 // linked binary small, and the state is a stack local so the worker never
 // writes to any global (single-writer invariant).
@@ -1513,7 +1597,24 @@ DWORD WINAPI WorkerThreadProc(LPVOID) {
     // a writer of shared state and break the single-writer invariant.
     int nextMouse = MOUSE_RIGHT;
 
+    // Last F4 type request this thread has acted on. Seeded from the current
+    // value so a counter that somehow already moved before the thread started
+    // is not replayed as a spurious first type. Stack local for the same reason
+    // as nextMouse: the worker must not write to any global.
+    unsigned seenTypeSeq = g_typeRequestSeq;
+
     while (!g_exitThread) {
+        // One-shot type request (F4). Deliberately NOT gated on isEnabled: the
+        // hook only raises the counter while the app is ON, so a pending
+        // request is one the user really made, and dropping it because an F3
+        // landed between the press and this poll would be a silent loss. The
+        // comparison is "did it change", not "how much", so a burst of presses
+        // inside one poll types once.
+        if (g_typeRequestSeq != seenTypeSeq) {
+            seenTypeSeq = g_typeRequestSeq;
+            TypeText(F4_TEXT);
+        }
+
         bool sentAny = false;
         if (isEnabled) {
             // One read of the shared state per cycle, then a pure decision.
