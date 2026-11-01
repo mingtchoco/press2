@@ -162,6 +162,9 @@ constexpr int MOUSE_COUNT = 2;
 //           in the same cycle; with the star off a chain cell behaves like solo.
 // "Armed" (the old boolean "selected") is simply mode != CELL_OFF: the hooks,
 // the keyup symmetry and the ini all use that meaning.
+// All 15 cells (13 keys + the two mouse buttons) paint the SAME colour per
+// mode - grey / green / red - so the colour alone identifies the mode; see the
+// colour block below and DrawKeyGrid.
 constexpr int CELL_OFF = 0;
 constexpr int CELL_SOLO = 1;
 constexpr int CELL_CHAIN = 2;
@@ -182,20 +185,19 @@ constexpr COLORREF ENABLED_BG_COLOR = RGB(240, 255, 240);   // Soft mint
 constexpr COLORREF DISABLED_BG_COLOR = RGB(248, 248, 248);  // Light gray
 constexpr COLORREF ENABLED_TEXT_COLOR = RGB(34, 139, 34);   // Forest green
 constexpr COLORREF DISABLED_TEXT_COLOR = RGB(128, 128, 128); // Gray
-constexpr COLORREF KEY_ON_BG_COLOR = RGB(34, 139, 34);      // Selected key
-constexpr COLORREF KEY_WARN_BG_COLOR = RGB(198, 88, 28);    // Selected ultimate (R)
-constexpr COLORREF KEY_OFF_BG_COLOR = RGB(214, 214, 214);   // Unselected key
+// The 15 toggle cells (13 keys + L + R) all share ONE three-colour scheme, so
+// the background alone says which mode a cell is in: grey OFF, green SOLO, red
+// CHAIN. Per-cell accent colours are deliberately gone - the ultimate key had
+// its own orange and the mouse cells their own blue/red, which at 18px left no
+// way to also show three modes. The two mouse cells are told apart from the
+// keys by SHAPE instead (an ellipse, see DrawKeyGrid).
+constexpr COLORREF KEY_OFF_BG_COLOR = RGB(214, 214, 214);   // cell OFF
+constexpr COLORREF KEY_ON_BG_COLOR = RGB(34, 139, 34);      // cell SOLO
+constexpr COLORREF KEY_CHAIN_BG_COLOR = RGB(200, 40, 40);   // cell CHAIN
 constexpr COLORREF STAR_ON_BG_COLOR = RGB(218, 165, 32);    // Chain mode on (gold)
-constexpr COLORREF MOUSE_RIGHT_BG_COLOR = RGB(200, 40, 40);  // R cell armed
-constexpr COLORREF MOUSE_LEFT_BG_COLOR = RGB(40, 90, 200);   // L cell armed
 constexpr COLORREF KEY_ON_TEXT_COLOR = RGB(255, 255, 255);
 constexpr COLORREF KEY_OFF_TEXT_COLOR = RGB(120, 120, 120);
 constexpr COLORREF SLIDER_TEXT_COLOR = RGB(0, 0, 0);        // ms readout
-
-// A CHAIN cell keeps its SOLO background and gets a gold inner frame this many
-// pixels thick (the star's own colour, so the chain look and the star match).
-// Purely a paint detail - it changes no geometry, so no layout constant moves.
-constexpr int CHAIN_BORDER = 2;
 
 // Per-key state.
 // EVERY field here is written ONLY from the main thread - the hook callback,
@@ -205,7 +207,6 @@ constexpr int CHAIN_BORDER = 2;
 struct KeyEntry {
     DWORD vk;                     // virtual key code
     const wchar_t* label;         // text drawn in the toggle grid, also the .ini key name
-    bool isUltimate;              // drawn in the accent colour (fires on cooldown)
     volatile int mode;            // CELL_OFF / CELL_SOLO / CELL_CHAIN
     volatile bool pressed;        // physically held right now
     volatile bool weBlockedDown;  // we swallowed the keydown, so we must swallow the keyup
@@ -215,19 +216,19 @@ struct KeyEntry {
 // the item keys default off on purpose. '1'..'7' are the main keyboard row, not
 // the numpad.
 KeyEntry g_keys[KEY_COUNT] = {
-    { 'Q', L"Q", false, CELL_OFF,  false, false },
-    { 'W', L"W", false, CELL_OFF,  false, false },
-    { 'E', L"E", false, CELL_SOLO, false, false },
-    { 'R', L"R", true,  CELL_OFF,  false, false },
-    { '1', L"1", false, CELL_OFF,  false, false },
-    { '2', L"2", false, CELL_OFF,  false, false },
-    { '3', L"3", false, CELL_OFF,  false, false },
-    { '4', L"4", false, CELL_OFF,  false, false },
-    { '5', L"5", false, CELL_OFF,  false, false },
-    { '6', L"6", false, CELL_OFF,  false, false },
-    { '7', L"7", false, CELL_OFF,  false, false },
-    { 'D', L"D", false, CELL_OFF,  false, false },
-    { 'F', L"F", false, CELL_OFF,  false, false },
+    { 'Q', L"Q", CELL_OFF,  false, false },
+    { 'W', L"W", CELL_OFF,  false, false },
+    { 'E', L"E", CELL_SOLO, false, false },
+    { 'R', L"R", CELL_OFF,  false, false },
+    { '1', L"1", CELL_OFF,  false, false },
+    { '2', L"2", CELL_OFF,  false, false },
+    { '3', L"3", CELL_OFF,  false, false },
+    { '4', L"4", CELL_OFF,  false, false },
+    { '5', L"5", CELL_OFF,  false, false },
+    { '6', L"6", CELL_OFF,  false, false },
+    { '7', L"7", CELL_OFF,  false, false },
+    { 'D', L"D", CELL_OFF,  false, false },
+    { 'F', L"F", CELL_OFF,  false, false },
 };
 
 // Per-mouse-button state, the exact twin of KeyEntry: same single-writer rule
@@ -263,11 +264,9 @@ volatile bool isEnabled = false;
 HBRUSH hBrushGreen = NULL;
 HBRUSH hBrushDisabled = NULL;   // window/label background while OFF (light gray)
 HBRUSH hBrushKeyOn = NULL;      // cached cell brushes, see DrawKeyGrid
-HBRUSH hBrushKeyWarn = NULL;
+HBRUSH hBrushKeyChain = NULL;   // cell in CELL_CHAIN (red)
 HBRUSH hBrushKeyOff = NULL;
 HBRUSH hBrushStarOn = NULL;
-HBRUSH hBrushMouseRight = NULL; // R cell while armed
-HBRUSH hBrushMouseLeft = NULL;  // L cell while armed
 wchar_t g_iniPath[MAX_PATH] = {0};  // settings file, next to the exe
 
 // Repeat period in ms and chain mode. Both are written ONLY from the main
@@ -732,9 +731,21 @@ int HitTestKeyCell(int x, int y) {
     return -1;
 }
 
+// Background brush and matching colour for a 3-state cell. Shared by the keys
+// and both mouse cells so one mode can never look like two different things.
+// The star is the only cell that does not use this (it is a 2-state gold
+// toggle, not a mode cell).
+HBRUSH CellModeBrush(int mode) {
+    if (mode == CELL_CHAIN) return hBrushKeyChain;
+    if (mode == CELL_SOLO) return hBrushKeyOn;
+    return hBrushKeyOff;
+}
+
 void DrawKeyGrid(HDC hdc) {
     HFONT prevFont = NULL;
     if (hFontKey) prevFont = (HFONT)SelectObject(hdc, hFontKey);
+    HGDIOBJ prevPen = NULL;
+    HGDIOBJ prevBrush = NULL;
     SetBkMode(hdc, TRANSPARENT);
 
     for (int i = 0; i < GRID_CELL_COUNT; i++) {
@@ -748,7 +759,7 @@ void DrawKeyGrid(HDC hdc) {
         HBRUSH brush = hBrushKeyOff;
         COLORREF fg = KEY_OFF_TEXT_COLOR;
         const wchar_t* text = L"";
-        bool chainCell = false;     // draw the gold inner frame
+        bool round = false;         // the two mouse cells are not rectangles
 
         if (GRID_SLOTS[i].kind == GridSlot::Star) {
             text = L"★";
@@ -758,44 +769,46 @@ void DrawKeyGrid(HDC hdc) {
             }
         } else if (GRID_SLOTS[i].kind == GridSlot::MouseLeft ||
                    GRID_SLOTS[i].kind == GridSlot::MouseRight) {
-            // Grey while off, the button's own accent colour with white text
-            // once armed; CHAIN adds the gold frame on the same background, so
-            // the two armed modes stay distinguishable at 18px.
+            // Same three mode colours as a key, but drawn as an ellipse so the
+            // mouse R cell cannot be misread as the ultimate key R one row up -
+            // at 18px the shape is the only cue left once the colour says mode.
             const int mi = (GRID_SLOTS[i].kind == GridSlot::MouseLeft)
                            ? MOUSE_LEFT : MOUSE_RIGHT;
+            const int mode = g_mouse[mi].mode;
             text = g_mouse[mi].label;
-            if (g_mouse[mi].mode != CELL_OFF) {
-                brush = (mi == MOUSE_LEFT) ? hBrushMouseLeft : hBrushMouseRight;
-                fg = KEY_ON_TEXT_COLOR;
-                chainCell = (g_mouse[mi].mode == CELL_CHAIN);
-            }
+            brush = CellModeBrush(mode);
+            if (mode != CELL_OFF) fg = KEY_ON_TEXT_COLOR;
+            round = true;
         } else {
             const KeyEntry& key = g_keys[GRID_SLOTS[i].keyIndex];
+            const int mode = key.mode;
             text = key.label;
-            if (key.mode != CELL_OFF) {
-                brush = key.isUltimate ? hBrushKeyWarn : hBrushKeyOn;
-                fg = KEY_ON_TEXT_COLOR;
-                chainCell = (key.mode == CELL_CHAIN);
-            }
+            brush = CellModeBrush(mode);
+            if (mode != CELL_OFF) fg = KEY_ON_TEXT_COLOR;
         }
 
-        if (chainCell && hBrushStarOn) {
-            // Gold first over the whole cell, then the mode colour inset by
-            // CHAIN_BORDER: that leaves an exact CHAIN_BORDER-px frame without
-            // a pen, a brush origin or a second GDI object to leak.
-            FillRect(hdc, &cell, hBrushStarOn);
-            RECT inner = cell;
-            InflateRect(&inner, -CHAIN_BORDER, -CHAIN_BORDER);
-            if (brush && inner.right > inner.left && inner.bottom > inner.top) {
-                FillRect(hdc, &inner, brush);
-            }
+        if (round) {
+            // Ellipse inscribed in the cell. The fill is the cached mode brush
+            // and the pen is the stock NULL_PEN, so nothing new is created and
+            // there is no GDI object to leak (stock objects are never deleted).
+            // The four corners outside the ellipse are left alone and keep the
+            // window background that WM_ERASEBKGND already painted.
+            HGDIOBJ pb = SelectObject(hdc, brush ? (HGDIOBJ)brush
+                                                 : GetStockObject(NULL_BRUSH));
+            HGDIOBJ pp = SelectObject(hdc, GetStockObject(NULL_PEN));
+            Ellipse(hdc, cell.left, cell.top, cell.right, cell.bottom);
+            if (!prevBrush) prevBrush = pb;
+            if (!prevPen) prevPen = pp;
         } else if (brush) {
             FillRect(hdc, &cell, brush);
         }
+
         SetTextColor(hdc, fg);
         DrawTextW(hdc, text, -1, &cell, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
+    if (prevPen) SelectObject(hdc, prevPen);
+    if (prevBrush) SelectObject(hdc, prevBrush);
     if (prevFont) SelectObject(hdc, prevFont);
 }
 
@@ -1072,11 +1085,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             hBrushGreen = CreateSolidBrush(ENABLED_BG_COLOR);
             hBrushDisabled = CreateSolidBrush(DISABLED_BG_COLOR);
             hBrushKeyOn = CreateSolidBrush(KEY_ON_BG_COLOR);
-            hBrushKeyWarn = CreateSolidBrush(KEY_WARN_BG_COLOR);
+            hBrushKeyChain = CreateSolidBrush(KEY_CHAIN_BG_COLOR);
             hBrushKeyOff = CreateSolidBrush(KEY_OFF_BG_COLOR);
             hBrushStarOn = CreateSolidBrush(STAR_ON_BG_COLOR);
-            hBrushMouseRight = CreateSolidBrush(MOUSE_RIGHT_BG_COLOR);
-            hBrushMouseLeft = CreateSolidBrush(MOUSE_LEFT_BG_COLOR);
             break;
 
         case WM_CTLCOLORSTATIC:
@@ -1242,11 +1253,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             if (hBrushGreen) { DeleteObject(hBrushGreen); hBrushGreen = NULL; }
             if (hBrushDisabled) { DeleteObject(hBrushDisabled); hBrushDisabled = NULL; }
             if (hBrushKeyOn) { DeleteObject(hBrushKeyOn); hBrushKeyOn = NULL; }
-            if (hBrushKeyWarn) { DeleteObject(hBrushKeyWarn); hBrushKeyWarn = NULL; }
+            if (hBrushKeyChain) { DeleteObject(hBrushKeyChain); hBrushKeyChain = NULL; }
             if (hBrushKeyOff) { DeleteObject(hBrushKeyOff); hBrushKeyOff = NULL; }
             if (hBrushStarOn) { DeleteObject(hBrushStarOn); hBrushStarOn = NULL; }
-            if (hBrushMouseRight) { DeleteObject(hBrushMouseRight); hBrushMouseRight = NULL; }
-            if (hBrushMouseLeft) { DeleteObject(hBrushMouseLeft); hBrushMouseLeft = NULL; }
 
             // Clean up fonts
             if (hFontStatus) {
