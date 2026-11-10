@@ -129,19 +129,62 @@ constexpr int KEY_FONT_SIZE = 14;
 
 // Repeat timing.
 // The wait between sends is still a run of Sleep(1) calls - timeBeginPeriod is
-// never used and no waitable timer is involved, so one Sleep(1) costs a full
-// timer tick (TICK_MS, ~15.5ms measured). The worker therefore wakes ~64.7
-// times/sec no matter what the interval is; the tick count only decides how
-// many wakes pass before a key is sent.
+// never used and no waitable timer is involved. What changed on 2026-11-11 is
+// how the loop decides it has waited long enough: it measures ELAPSED TIME with
+// QueryPerformanceCounter instead of COUNTING Sleep(1) calls.
 //
+// Why: counting calls silently hard-codes the timer quantum. The old code
+// converted the ms setting into a number of Sleep(1) calls assuming one call
+// costs ~15.5ms. On this PC the system timer resolution is now 0.977ms (another
+// process raises it and Windows no longer isolates that from us - measured:
+// NtQueryTimerResolution current = 0.977ms, Sleep(1) avg 1.83ms in a process
+// that never calls timeBeginPeriod), so the same 10 calls that used to be 155ms
+// became ~18ms and a 150ms setting repeated at near-zero delay. Measuring the
+// elapsed time makes the period correct at ANY resolution; the only thing the
+// quantum still decides is how finely the loop can stop (and how often it
+// wakes), not how long it waits.
+//
+// Why not a QPC spin: the loop only READS the clock between Sleep(1) calls, it
+// never busy-waits on it. A hybrid Sleep+QPC spin was measured on 2026-08-03 to
+// burn a whole core at 97-100% and is a rejected approach for a game utility.
+// timeBeginPeriod and a waitable timer are rejected too (see CLAUDE.md).
+//
+// Why the wait sleeps in SLICES of up to MAX_WAIT_SLICE_MS rather than Sleep(1)
+// every time: with the quantum at ~1ms a Sleep(1) loop wakes the worker ~1000
+// times a second, 15x what it used to, and this repository has a history of
+// losing in-game frames to scheduler pressure (2026-04-08). Asking for the
+// whole remaining time in one Sleep, capped at 8ms, keeps the wake count down
+// without changing anything else:
+//   - at the coarse default (~15.6ms) Sleep(1) and Sleep(8) cost the SAME one
+//     quantum, so behaviour, wake rate (~64/s) and the stop-on-release latency
+//     (<= one quantum) are all exactly what they were;
+//   - at this machine's measured ~1.9ms quantum the wake rate drops from
+//     ~521/s to ~130/s, and the release latency becomes at most 8ms, which is
+//     BETTER than the ~16ms the coarse quantum used to impose.
+// 8 is the cap because it is the largest slice that still rounds down to a
+// single quantum at the coarse default (15.6 > 8) while keeping the release
+// latency under half of that old ~16ms worst case.
+//
+// The slice is NOT the remaining time. It is MAX_WAIT_SLICE_MS while the
+// deadline is more than TWO slices away, and exactly 1 after that. The reason
+// is the half-quantum correction in ShouldStopWaiting, which is handed
+// `now - prev`, the measured length of the sleep that just ended. That value is
+// only the real timer quantum if the sleep asked for 1ms; a long slice reports
+// its own length instead, and crediting half of a long slice when the next
+// sleep would have been short makes the loop stop early - measured at -1.2ms
+// on a 150ms period when the slice was the remaining time.
+// Switching to Sleep(1) two slices out removes that case by construction:
+// stopping right after a Sleep(MAX_WAIT_SLICE_MS) would need the remainder to
+// be <= MAX_WAIT_SLICE_MS/2, but that sleep only happens while the remainder is
+// above 2 * MAX_WAIT_SLICE_MS, so the stop decision always lands just after a
+// Sleep(1) and lastSleepMs is always the true quantum. At the coarse default
+// every sleep costs one quantum anyway, so the behaviour there is identical to
+// the plain Sleep(1) loop.
+constexpr int MAX_WAIT_SLICE_MS = 8;
+
 // The user-facing value is the repeat period in milliseconds (g_intervalMs,
 // driven by the slider). It is quantised to INTERVAL_STEP_MS, so the value set
 // is 35, 40, ... 200 - evenly spaced, no special case at either end.
-// MIN_INTERVAL_MS is ~2.26 ticks: MIN_TICKS (2) stays the hard floor and the
-// dithering in IntervalToTicks spreads 35ms over 2 and 3 ticks. 1 tick would be
-// the structural cap (~64 sends/sec). 0 ticks is never allowed (endless spam).
-constexpr double TICK_MS = 15.5;
-constexpr int MIN_TICKS = 2;
 constexpr int MIN_INTERVAL_MS = 35;
 constexpr int MAX_INTERVAL_MS = 200;
 constexpr int INTERVAL_STEP_MS = 5;        // slider/wheel granularity
@@ -381,7 +424,8 @@ void SetIntervalFromX(int x);
 void NudgeInterval(HWND hwnd, int delta);
 void DrawKeyGrid(HDC hdc);
 void DrawSlider(HDC hdc);
-int  IntervalToTicks(int intervalMs, double rndJitter, double rndDither);
+double IntervalToTargetMs(int intervalMs, double rndJitter);
+bool ShouldStopWaiting(double elapsedMs, double lastSleepMs, double targetMs);
 
 // Clear the physical-hold flags. Deliberately leaves weBlockedDown alone:
 // if we already swallowed a keydown we still owe the target app its keyup.
@@ -879,27 +923,40 @@ void DrawSlider(HDC hdc) {
     if (prevFont) SelectObject(hdc, prevFont);
 }
 
-// Pure helper: repeat period in ms -> number of Sleep(1) calls to wait.
-// rndJitter and rndDither are both uniform in [0, 1).
-//   1. jitter the target by +/- JITTER_MS and clamp it to the slider range
-//   2. stochastic rounding (dithering) of target / TICK_MS, so the AVERAGE
-//      period matches the setting even though a tick is a coarse ~15.5ms
-//   3. never fewer than MIN_TICKS ticks
-// At the two ends of the range the clamp in step 1 is one-sided, so the mean
-// is pulled inwards: a setting of 35 averages ~36.5ms and 200 averages
-// ~198.5ms (measured over 100k draws). That is intentional - the alternative
-// is letting the jitter push the period below the floor the user asked for.
-// Away from the ends the mean matches the setting exactly (the default 150
-// measured 150.01ms over 100k draws).
+// Pure helper: repeat period in ms -> the wait target for this cycle, in ms.
+// rndJitter is uniform in [0, 1): it jitters the target by +/- JITTER_MS and
+// the result is clamped to the slider range. No timer quantum appears here at
+// all - the target is a time, and the wait loop below measures time.
+// At the two ends of the range the clamp is one-sided, so the mean is pulled
+// inwards: a setting of 35 averages ~36.5ms and 200 averages ~198.5ms. That is
+// intentional - the alternative is letting the jitter push the period below the
+// floor the user asked for. Away from the ends the mean matches the setting
+// exactly (the default 150 averages 150).
 // Kept free of globals so it can be unit tested outside the app.
-int IntervalToTicks(int intervalMs, double rndJitter, double rndDither) {
+double IntervalToTargetMs(int intervalMs, double rndJitter) {
     double target = (double)intervalMs + (rndJitter * 2.0 - 1.0) * (double)JITTER_MS;
     if (target < (double)MIN_INTERVAL_MS) target = (double)MIN_INTERVAL_MS;
     if (target > (double)MAX_INTERVAL_MS) target = (double)MAX_INTERVAL_MS;
+    return target;
+}
 
-    int n = (int)(target / TICK_MS + rndDither);   // positive, so this floors
-    if (n < MIN_TICKS) n = MIN_TICKS;
-    return n;
+// Pure helper: has the wait loop waited long enough?
+// elapsedMs    - time since the cycle's sends finished
+// lastSleepMs  - how long the Sleep(1) we just returned from actually took,
+//                i.e. the timer quantum as measured on this machine right now
+// targetMs     - what IntervalToTargetMs asked for
+//
+// Why the half-quantum: the loop can only stop on a quantum boundary, so a
+// plain "elapsed >= target" always overshoots by up to a whole quantum and the
+// average period comes out target + quantum/2 (that was +7.8ms at a 15.5ms
+// quantum). Adding half of the measured quantum before comparing stops at the
+// NEAREST boundary instead of the next one, which leaves the error centred on
+// zero and uniform in +/- quantum/2. This is what the old stochastic rounding
+// (dithering) against a hard-coded 15.5ms quantum used to buy, except it no
+// longer assumes any particular quantum: it works the same at 15.6ms and 1ms.
+// Kept free of globals so it can be unit tested outside the app.
+bool ShouldStopWaiting(double elapsedMs, double lastSleepMs, double targetMs) {
+    return elapsedMs + lastSleepMs * 0.5 >= targetMs;
 }
 
 // Monitor enumeration callback to find leftmost monitor
@@ -1592,6 +1649,15 @@ DWORD WINAPI WorkerThreadProc(LPVOID) {
     unsigned rngState = (unsigned)GetTickCount() ^ (unsigned)GetCurrentThreadId();
     if (rngState == 0) rngState = 0x9E3779B9u;   // xorshift must never be seeded 0
 
+    // QPC ticks per second, read once. Stack local for the same reason as
+    // nextMouse below: the worker must not write to any global. QPC lives in
+    // KERNEL32, which the exe already imports, so no new DLL dependency.
+    LARGE_INTEGER qpcFreqRaw;
+    qpcFreqRaw.QuadPart = 0;
+    QueryPerformanceFrequency(&qpcFreqRaw);
+    const double qpcFreq = (qpcFreqRaw.QuadPart > 0) ? (double)qpcFreqRaw.QuadPart
+                                                     : 10000000.0;
+
     // Which button gets the next click when both are in the running; the right
     // button goes first. Stack local on purpose: a global would make the worker
     // a writer of shared state and break the single-writer invariant.
@@ -1648,19 +1714,62 @@ DWORD WINAPI WorkerThreadProc(LPVOID) {
         }
 
         if (sentAny) {
-            // Wait out the interval. One Sleep(1) == one timer tick (TICK_MS),
-            // so the ms setting is converted to a tick count with jitter and
-            // stochastic rounding. Re-checking the flags after each Sleep(1)
-            // stops within one tick of the key being released instead of
-            // sitting out the whole remaining interval.
-            const int ticks = IntervalToTicks(g_intervalMs, Rnd01(rngState), Rnd01(rngState));
-            for (int i = 0; i < ticks && !g_exitThread; i++) {
-                Sleep(1);
+            // Wait out the interval. The loop sleeps in Sleep(1) steps as it
+            // always has, but it decides when to stop from the MEASURED elapsed
+            // time, not from a count of Sleep calls - counting calls bakes in a
+            // timer quantum, and this machine's quantum changed from ~15.5ms to
+            // ~1.8ms underneath us (see the "Repeat timing" comment). QPC is
+            // only read between sleeps; nothing spins on it.
+            //
+            // At least one Sleep always happens (do/while) and the slice is
+            // never below 1ms: that is the old minimum-wait guard in its new
+            // form, the floor that keeps a cycle from degenerating into an
+            // unbounded send loop even if the target were somehow zero. A
+            // slice of 0 would be Sleep(0), which yields instead of waiting -
+            // a spin, which this project rejects outright.
+            //
+            // Re-checking the flags after each slice stops within one slice
+            // (<= MAX_WAIT_SLICE_MS, and <= one quantum when the quantum is
+            // coarser than that) of the key being released, instead of sitting
+            // out the whole remaining interval.
+            const double targetMs = IntervalToTargetMs(g_intervalMs, Rnd01(rngState));
+            LARGE_INTEGER start, prev, now;
+            QueryPerformanceCounter(&start);
+            prev = start;
+            now = start;
+            do {
+                // Coarse approach, fine landing: sleep in MAX_WAIT_SLICE_MS
+                // chunks while the deadline is more than two chunks away, then
+                // switch to Sleep(1) for the rest. See the "Repeat timing"
+                // comment for why the switch point is 2 * MAX_WAIT_SLICE_MS and
+                // not the remaining time itself.
+                const double doneMs =
+                    (double)(now.QuadPart - start.QuadPart) * 1000.0 / qpcFreq;
+                const double remainMs = targetMs - doneMs;
+                const int slice = (remainMs > 2.0 * (double)MAX_WAIT_SLICE_MS)
+                                      ? MAX_WAIT_SLICE_MS : 1;
+
+                // slice is 1 or MAX_WAIT_SLICE_MS by construction, so it can
+                // never be <= 0 here. Keep it that way: Sleep takes a DWORD, so
+                // a negative slice would not spin, it would wrap to ~4.29e9 ms
+                // and park the worker for 49.7 DAYS. Any future change to the
+                // line above has to preserve slice >= 1.
+                Sleep((DWORD)slice);
+                QueryPerformanceCounter(&now);
+                if (g_exitThread) break;
                 // Stop on release (key or mouse button)
                 if (!isEnabled || (!AnyKeyActive() && !MouseActive())) break;
-            }
+                const double elapsedMs =
+                    (double)(now.QuadPart - start.QuadPart) * 1000.0 / qpcFreq;
+                const double lastSleepMs =
+                    (double)(now.QuadPart - prev.QuadPart) * 1000.0 / qpcFreq;
+                if (ShouldStopWaiting(elapsedMs, lastSleepMs, targetMs)) break;
+                prev = now;
+            } while (true);
         } else {
-            // Idle poll: one timer tick (TICK_MS, ~15.5ms) in practice
+            // Idle poll: one timer quantum in practice (2-16ms depending on the
+            // system timer resolution - Sleep(1) and Sleep(2) measure the same
+            // at the coarse default).
             Sleep(2);
         }
     }
